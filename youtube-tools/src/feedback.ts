@@ -54,7 +54,10 @@ const icons = {
 };
 type Action = keyof typeof icons;
 const actions = ["interest", "channel"] as const;
-const menuIcons: Record<Action, string> = { interest: "HIDE", channel: "REMOVE" };
+const menuIcons: Record<Action, string> = {
+  interest: "HIDE",
+  channel: "REMOVE",
+};
 
 type Item = {
   element: Element;
@@ -547,9 +550,12 @@ function measure(
   const top = image.top + insetY;
   const bottom = image.bottom - height - insetY;
   const source = preview ?? item.anchor;
-  const surfaceButton = source.querySelector(`${nativeActions} ${nativeSurface}`);
+  const surfaceButton = source.querySelector(
+    `${nativeActions} ${nativeSurface}`,
+  );
   const surfaceContainer =
-    surfaceButton?.closest(nativeActions) ?? source.querySelector(nativeActions);
+    surfaceButton?.closest(nativeActions) ??
+    source.querySelector(nativeActions);
   const classes = surfaceButton
     ? surfaceClasses.filter((name) => surfaceButton.classList.contains(name))
     : [tonalBackground];
@@ -605,7 +611,8 @@ function positionPanel(
 function movePanel(panel: HTMLDivElement, parent: Element): void {
   if (
     typeof parent.moveBefore === "function" &&
-    panel.isConnected === parent.isConnected
+    panel.getRootNode({ composed: true }) ===
+      parent.getRootNode({ composed: true })
   ) {
     parent.moveBefore(panel, null);
     return;
@@ -618,7 +625,7 @@ function movePanel(panel: HTMLDivElement, parent: Element): void {
 
 export function feedback(): void {
   GM_addStyle(styles);
-  app((root) => {
+  app((root, signal) => {
     const items = new Map<Element, Item>();
     const notices = new WeakMap<HTMLButtonElement, number>();
     const pendingPositions = new Set<Item>();
@@ -862,7 +869,10 @@ export function feedback(): void {
         mobileFrame ??= window.requestAnimationFrame(clipMobileControls);
     }
 
-    function setPosition(item: Item, position: ReturnType<typeof measure>): void {
+    function setPosition(
+      item: Item,
+      position: ReturnType<typeof measure>,
+    ): void {
       const container = position?.surfaceContainer ?? undefined;
       if (item.nativeSurface?.container !== container) {
         item.nativeSurface?.observer.disconnect();
@@ -916,6 +926,7 @@ export function feedback(): void {
     }
 
     function schedulePosition(item: Item): void {
+      if (signal.aborted) return;
       pendingPositions.add(item);
       frame ??= window.requestAnimationFrame(positionBatch);
     }
@@ -1152,7 +1163,12 @@ export function feedback(): void {
         refreshActions(item);
         const owned = popup ? ownedMenus() : [];
         if (popup && (owned.length !== 1 || owned[0] !== popup)) return;
-        if (button.hidden || !entry || !popup || selectedEntry(popup) !== entry) {
+        if (
+          button.hidden ||
+          !entry ||
+          !popup ||
+          selectedEntry(popup) !== entry
+        ) {
           if (popup) close(popup);
           if (!button.hidden) unavailable(button, action);
           return;
@@ -1194,6 +1210,8 @@ export function feedback(): void {
         window.cancelAnimationFrame(frame);
         frame = undefined;
       }
+      for (const button of item.panel.querySelectorAll("button"))
+        window.clearTimeout(notices.get(button));
       item.panel.remove();
       item.anchor.classList.remove("ytt-feedback-thumbnail");
       item.element.classList.remove("ytt-feedback-card");
@@ -1438,6 +1456,7 @@ export function feedback(): void {
 
     window.addEventListener("resize", () => items.forEach(schedulePosition), {
       passive: true,
+      signal,
     });
     document.addEventListener(
       "scroll",
@@ -1457,26 +1476,34 @@ export function feedback(): void {
         changedScroll.add(scroller);
         frame ??= window.requestAnimationFrame(positionBatch);
       },
-      { capture: true, passive: true },
+      { capture: true, passive: true, signal },
     );
     if (mobile)
       for (const type of ["transitionrun", "transitionend", "transitioncancel"])
-        root.addEventListener(type, (event) => {
-          if (
-            event.target instanceof Element &&
-            event.target.matches(mobileBars)
-          )
-            scheduleMobileClip();
-        });
-    root.addEventListener("focusin", (event) => {
-      if (preview) syncPreview();
-      const selected =
-        event.target instanceof Element
-          ? event.target.closest(cardSelector)
-          : null;
-      const item = selected && items.get(selected);
-      if (item) refreshActions(item);
-    });
+        root.addEventListener(
+          type,
+          (event) => {
+            if (
+              event.target instanceof Element &&
+              event.target.matches(mobileBars)
+            )
+              scheduleMobileClip();
+          },
+          { signal },
+        );
+    root.addEventListener(
+      "focusin",
+      (event) => {
+        if (preview) syncPreview();
+        const selected =
+          event.target instanceof Element
+            ? event.target.closest(cardSelector)
+            : null;
+        const item = selected && items.get(selected);
+        if (item) refreshActions(item);
+      },
+      { signal },
+    );
     if (!mobile)
       root.addEventListener(
         "keydown",
@@ -1488,7 +1515,7 @@ export function feedback(): void {
           )
             syncPreview(true);
         },
-        true,
+        { capture: true, signal },
       );
     root.addEventListener(
       "pointerover",
@@ -1513,10 +1540,29 @@ export function feedback(): void {
           );
         if (item) refreshActions(item);
       },
-      { capture: true, passive: true },
+      { capture: true, passive: true, signal },
     );
-    if (!mobile) root.addEventListener("pointerleave", () => setHovered());
-    navigation(sync);
+    if (!mobile)
+      root.addEventListener("pointerleave", () => setHovered(), { signal });
+    navigation(sync, signal);
+    signal.addEventListener(
+      "abort",
+      () => {
+        cancelOperation();
+        scope = undefined;
+        observer.disconnect();
+        managers?.disconnect();
+        items.forEach(remove);
+        previewObserver?.disconnect();
+        thumbnails?.disconnect();
+        clippingSizes?.disconnect();
+        mobileThumbnails?.disconnect();
+        mobileBarChanges?.disconnect();
+        if (frame !== undefined) window.cancelAnimationFrame(frame);
+        if (mobileFrame !== undefined) window.cancelAnimationFrame(mobileFrame);
+      },
+      { once: true },
+    );
     sync();
   });
 }

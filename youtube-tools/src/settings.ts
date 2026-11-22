@@ -128,7 +128,7 @@ export function settings(): void {
       controls.get(key)?.setAttribute("aria-checked", String(enabled(key))),
     );
   if (mobile) {
-    app((root) => {
+    app((root, signal) => {
       const observer = new MutationObserver(() => mount());
       let watching = false;
       function sync(): void {
@@ -146,7 +146,17 @@ export function settings(): void {
         }
         mount();
       }
-      navigation(sync);
+      navigation(sync, signal);
+      signal.addEventListener(
+        "abort",
+        () => {
+          observer.disconnect();
+          mounted?.remove();
+          mounted = null;
+          controls.clear();
+        },
+        { once: true },
+      );
       sync();
     });
   } else {

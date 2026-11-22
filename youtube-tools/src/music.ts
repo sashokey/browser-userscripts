@@ -1,29 +1,85 @@
-const audioTrack = "MUSIC_VIDEO_TYPE_ATV";
+import { observeAppTree } from "./dom.ts";
+
+const audioTracks = new Set([
+  "MUSIC_VIDEO_TYPE_ATV",
+  "MUSIC_VIDEO_TYPE_PRIVATELY_OWNED_TRACK",
+]);
 const appSelector = "ytmusic-app";
 const musicRows =
   "ytmusic-two-row-item-renderer,ytmusic-responsive-list-item-renderer,ytmusic-card-shelf-renderer,ytmusic-player-queue-item";
 const filtered = "data-youtube-tools-video";
 const blocked = "data-youtube-tools-blocked";
+const queueSelector = "ytmusic-player-queue,ytmusic-player-queue-item";
 
 type Track = { id: string; allowed: boolean };
-type Pending = { queue: object; id: string; previous?: string; step: 1 | -1 };
-type Guard = { owner: object; original: unknown; wrapper: unknown };
+type Pending = {
+  queue: object;
+  player: object;
+  id: string;
+  index: number;
+  previous?: string;
+  step: 1 | -1;
+};
+type Guard = { owner: object; wrapper: unknown; get?: () => unknown };
+
+function ownProperty(
+  owner: object,
+  key: string,
+): PropertyDescriptor | undefined {
+  try {
+    return Object.getOwnPropertyDescriptor(owner, key);
+  } catch {}
+}
+
+function observeAssignment(
+  owner: object,
+  key: string,
+  property: PropertyDescriptor | undefined,
+  get: () => unknown,
+  update: (value: unknown) => void,
+): boolean {
+  if (!property?.configurable || !property.writable) return false;
+  try {
+    return Reflect.defineProperty(owner, key, {
+      configurable: true,
+      enumerable: property.enumerable ?? false,
+      get,
+      set(this: object, value: unknown) {
+        if (this === owner) update(value);
+        else
+          Object.defineProperty(this, key, {
+            value,
+            configurable: true,
+            enumerable: true,
+            writable: true,
+          });
+      },
+    });
+  } catch {
+    return false;
+  }
+}
 
 function object(value: unknown): value is object {
   return value !== null && typeof value === "object";
 }
 
 function read(value: unknown, ...keys: string[]): unknown {
-  for (const key of keys) {
-    if (!object(value)) return;
-    value = Reflect.get(value, key);
-  }
-  return value;
+  try {
+    for (const key of keys) {
+      if (!object(value)) return;
+      value = Reflect.get(value, key);
+    }
+    return value;
+  } catch {}
 }
 
 function invoke(owner: unknown, key: string): unknown {
   const method = read(owner, key);
-  if (typeof method === "function") return Reflect.apply(method, owner, []);
+  if (typeof method !== "function") return;
+  try {
+    return Reflect.apply(method, owner, []);
+  } catch {}
 }
 
 function id(value: unknown): string | undefined {
@@ -74,7 +130,7 @@ function track(data: unknown): Track | undefined {
       "musicVideoType",
     );
     if (typeof kind === "string")
-      return { id: videoId, allowed: kind === audioTrack };
+      return { id: videoId, allowed: audioTracks.has(kind) };
   }
   return { id: videoId, allowed: savedTrack(data) };
 }
@@ -101,13 +157,13 @@ function currentIndex(queue: object): number {
   return typeof index === "number" && Number.isSafeInteger(index) ? index : -1;
 }
 
-function playerTrack(player: unknown, candidate: string): boolean {
-  const response = invoke(player, "getPlayerResponse");
-  const details = read(response, "videoDetails");
-  return (
-    read(details, "videoId") === candidate &&
-    read(details, "musicVideoType") === audioTrack
-  );
+function playerTrack(player: unknown, candidate: string): boolean | undefined {
+  try {
+    const details = read(invoke(player, "getPlayerResponse"), "videoDetails");
+    if (read(details, "videoId") !== candidate) return;
+    const kind = read(details, "musicVideoType");
+    if (typeof kind === "string") return audioTracks.has(kind);
+  } catch {}
 }
 
 function watchId(): string | undefined {
@@ -115,12 +171,20 @@ function watchId(): string | undefined {
     return id(new URLSearchParams(location.search).get("v"));
 }
 
+function repeatAll(): boolean {
+  return (
+    read(document.querySelector("ytmusic-player-bar"), "repeatMode") === "ALL"
+  );
+}
+
 export function music(): void {
   let app: Element | null = null;
   let queue: object | undefined;
-  let previous: Track | undefined;
+  let currentPlayer: object | undefined;
+  let previous: { id: string; index: number; item: unknown } | undefined;
   let pending: Pending | undefined;
   const patched = new WeakMap<object, Map<string, Guard>>();
+  const watchedPlayers = new WeakMap<object, () => unknown>();
 
   GM_addStyle(`[${filtered}]{display:none!important}
     :root[${blocked}] ytmusic-player,
@@ -131,27 +195,45 @@ export function music(): void {
     document.documentElement?.toggleAttribute(blocked, value);
   }
 
+  function stillActive(owner: object, player: object): boolean {
+    return (
+      !!app?.isConnected &&
+      queue === owner &&
+      currentPlayer === player &&
+      read(app, "queue") === owner &&
+      read(owner, "playerApi") === player
+    );
+  }
+
   function advance(request: Pending): void {
-    if (pending !== request || queue !== request.queue) return;
-    const rows = items(queue);
-    const current = currentIndex(queue);
+    if (pending !== request) return;
+    const owner = request.queue;
+    if (!stillActive(owner, request.player)) {
+      pending = undefined;
+      return;
+    }
+    const rows = items(owner);
+    const current = currentIndex(owner);
     const selected = queueTrack(rows[current])?.id;
     if (selected !== request.id && selected !== request.previous) return;
     const rejected =
       selected === request.id
         ? current
-        : rows.findIndex((item) => queueTrack(item)?.id === request.id);
+        : queueTrack(rows[request.index])?.id === request.id
+          ? request.index
+          : rows.findIndex((item) => queueTrack(item)?.id === request.id);
     if (rejected < 0) return;
-    for (
-      let index = rejected + request.step;
-      index >= 0 && index < rows.length;
-      index += request.step
-    ) {
+    const repeat = repeatAll();
+    for (let count = 1; count < rows.length; count++) {
+      const next = rejected + count * request.step;
+      if (!repeat && (next < 0 || next >= rows.length)) break;
+      const index = (next + rows.length) % rows.length;
       const item = rows[index];
       if (!queueTrack(item)?.allowed) continue;
-      const select = read(queue, "selectQueueItem");
+      const select = read(owner, "selectQueueItem");
       pending = undefined;
-      if (typeof select === "function") Reflect.apply(select, queue, [item]);
+      if (typeof select === "function" && stillActive(owner, request.player))
+        Reflect.apply(select, owner, [item]);
       return;
     }
   }
@@ -165,31 +247,50 @@ export function music(): void {
     const rows = items(owner);
     const current = currentIndex(owner);
     const selected = queueTrack(rows[current]);
-    const result =
-      selected?.id === target
-        ? selected
-        : rows.map(queueTrack).find((item) => item?.id === target);
-    const allowed = result?.allowed ?? playerTrack(player, target);
-    if (!selecting) return allowed;
-    if (allowed) {
-      pending = undefined;
-      previous = { id: target, allowed: true };
-      block(false);
-      return true;
-    }
-    block(true);
-    const old =
-      previous &&
-      rows.findIndex((item) => queueTrack(item)?.id === previous?.id);
     const next =
       selected?.id === target
         ? current
         : rows.findIndex((item) => queueTrack(item)?.id === target);
+    const result = queueTrack(rows[next]);
+    const allowed = playerTrack(player, target) ?? result?.allowed ?? false;
+    if (!selecting) return allowed;
+    if (allowed) {
+      pending = undefined;
+      previous = { id: target, index: next, item: rows[next] };
+      block(false);
+      return true;
+    }
+    if (
+      watchId() === target &&
+      !new URLSearchParams(location.search).get("list")
+    ) {
+      pending = undefined;
+      block(true);
+      invoke(player, "pauseVideo");
+      return false;
+    }
+    if (!previous || previous.id === target) block(true);
+    const old =
+      previous &&
+      (queueTrack(rows[previous.index])?.id === previous.id
+        ? previous.index
+        : rows.indexOf(previous.item));
+    if (next < 0) {
+      pending = undefined;
+      return false;
+    }
+    let step: 1 | -1 = old !== undefined && next < old ? -1 : 1;
+    if (repeatAll()) {
+      if (old === rows.length - 1 && next === 0) step = 1;
+      if (old === 0 && next === rows.length - 1) step = -1;
+    }
     const request: Pending = {
       queue: owner,
+      player,
       id: target,
+      index: next,
       ...(selected ? { previous: selected.id } : {}),
-      step: old !== undefined && next >= 0 && next < old ? -1 : 1,
+      step,
     };
     pending = request;
     queueMicrotask(() => advance(request));
@@ -208,44 +309,87 @@ export function music(): void {
       "enqueueVideoByPlayerVars",
       "playVideo",
     ] as const) {
-      const current = read(player, name);
+      const descriptor = ownProperty(player, name);
       const last = methods.get(name);
-      if (last?.wrapper === current && last?.owner === owner) continue;
-      const native = last && last.wrapper === current ? last.original : current;
-      if (typeof native !== "function") continue;
-      const guarded = new Proxy(native, {
-        apply(method, receiver: unknown, args: unknown[]) {
-          const selecting = name !== "enqueueVideoByPlayerVars";
-          const target =
-            name === "playVideo"
-              ? (queueTrack(items(owner)[currentIndex(owner)])?.id ?? watchId())
-              : (id(read(args[0], "video_id")) ?? id(read(args[0], "videoId")));
-          if (
-            queue === owner &&
-            target &&
-            !allow(owner, player, target, selecting)
-          )
-            return;
-          const result: unknown = Reflect.apply(method, receiver, args);
-          return result;
-        },
-      });
-      if (Reflect.set(player, name, guarded)) {
-        methods.set(name, { owner, original: native, wrapper: guarded });
+      if (last?.get && descriptor?.get === last.get) {
+        last.owner = owner;
+        continue;
       }
+      if (descriptor && !descriptor.writable) continue;
+      const current = read(player, name);
+      if (last && last.wrapper === current) {
+        last.owner = owner;
+        continue;
+      }
+      if (typeof current !== "function") continue;
+      const entry: Guard = { owner, wrapper: undefined };
+      function wrap(value: unknown): unknown {
+        if (typeof value !== "function") return value;
+        return new Proxy(value, {
+          apply(method, receiver: unknown, args: unknown[]) {
+            const owner = entry.owner;
+            if (stillActive(owner, player)) {
+              const selecting = name !== "enqueueVideoByPlayerVars";
+              const target =
+                name === "playVideo"
+                  ? (id(read(invoke(player, "getVideoData"), "video_id")) ??
+                    queueTrack(items(owner)[currentIndex(owner)])?.id ??
+                    watchId())
+                  : (id(read(args[0], "video_id")) ??
+                    id(read(args[0], "videoId")));
+              if (target && !allow(owner, player, target, selecting)) return;
+            }
+            const result: unknown = Reflect.apply(method, receiver, args);
+            return result;
+          },
+        });
+      }
+      entry.wrapper = wrap(current);
+      const get = () => entry.wrapper;
+      if (
+        observeAssignment(player, name, descriptor, get, (replacement) => {
+          if (replacement !== entry.wrapper) entry.wrapper = wrap(replacement);
+        })
+      ) {
+        entry.get = get;
+        methods.set(name, entry);
+        continue;
+      }
+      try {
+        if (Reflect.set(player, name, entry.wrapper)) methods.set(name, entry);
+      } catch {}
     }
   }
 
+  function watchPlayer(owner: object): void {
+    const property = ownProperty(owner, "playerApi");
+    const installed = watchedPlayers.get(owner);
+    if (installed && property?.get === installed) return;
+    let value = read(owner, "playerApi");
+    const get = () => value;
+    if (
+      observeAssignment(owner, "playerApi", property, get, (replacement) => {
+        if (replacement === value) return;
+        value = replacement;
+        if (app?.isConnected && read(app, "queue") === owner) updateQueue();
+      })
+    )
+      watchedPlayers.set(owner, get);
+  }
+
   function updateQueue(): void {
-    const owner = read(app, "queue");
-    if (!object(owner)) return;
-    if (queue !== owner) {
+    const value = read(app, "queue");
+    const owner = object(value) ? value : undefined;
+    if (owner) watchPlayer(owner);
+    const playerValue = read(owner, "playerApi");
+    const player = object(playerValue) ? playerValue : undefined;
+    if (queue !== owner || currentPlayer !== player) {
       queue = owner;
+      currentPlayer = player;
       previous = undefined;
       pending = undefined;
     }
-    const player = read(owner, "playerApi");
-    if (object(player)) guard(owner, player);
+    if (owner && player) guard(owner, player);
   }
 
   function update(row: Element): void {
@@ -259,12 +403,10 @@ export function music(): void {
   }
 
   const observer = new MutationObserver((records) => {
-    if (!app) {
-      attach();
-      return;
-    }
+    if (!app?.isConnected) return;
     updateQueue();
     const changed = new Set<Element>();
+    let queueChanged = false;
     for (const record of records) {
       const element =
         record.target instanceof Element
@@ -272,28 +414,39 @@ export function music(): void {
           : record.target.parentElement;
       const row = element?.closest(musicRows);
       if (row) changed.add(row);
-      for (const node of record.addedNodes) collect(node, changed);
+      queueChanged ||= Boolean(element?.closest(queueSelector));
+      for (const node of record.addedNodes) {
+        collect(node, changed);
+        if (node instanceof Element)
+          queueChanged ||=
+            node.matches(queueSelector) ||
+            Boolean(node.querySelector(queueSelector));
+      }
     }
     for (const row of changed) update(row);
-    if (pending) advance(pending);
+    if (pending && queueChanged) advance(pending);
+  });
+  const lifecycle = new MutationObserver(() => {
+    if (!app?.isConnected) attach();
+    else observeAppTree(lifecycle, app);
   });
 
   function attach(): void {
     app = document.querySelector(appSelector);
-    if (!app) return;
     observer.disconnect();
+    observeAppTree(lifecycle, app);
+    updateQueue();
+    if (!app) return;
     observer.observe(app, {
       subtree: true,
       childList: true,
       characterData: true,
     });
-    updateQueue();
     for (const row of app.querySelectorAll(musicRows)) update(row);
   }
 
   block(watchId() !== undefined);
   attach();
-  if (!app) observer.observe(document, { subtree: true, childList: true });
   document.addEventListener(
     "play",
     (event) => {
@@ -307,7 +460,7 @@ export function music(): void {
       if (!target) return;
       const allowed = queue
         ? allow(queue, player, target, true)
-        : playerTrack(player, target);
+        : (playerTrack(player, target) ?? false);
       block(!allowed);
       if (!allowed) video.pause();
     },

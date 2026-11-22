@@ -1,5 +1,10 @@
 export const mobile = location.hostname === "m.youtube.com";
 const selector = mobile ? "ytm-app" : "ytd-app";
+type AppConsumer = (root: Element, signal: AbortSignal) => void;
+const consumers = new Set<AppConsumer>();
+let root: Element | null = null;
+let lifetime: AbortController | undefined;
+let observer: MutationObserver | undefined;
 
 export function ready(run: () => void): void {
   if (document.readyState === "loading")
@@ -7,31 +12,49 @@ export function ready(run: () => void): void {
   else run();
 }
 
-export function app(run: (root: Element) => void): void {
-  const element = document.querySelector(selector);
-  if (element) {
-    run(element);
-    return;
-  }
-  const observer = new MutationObserver(() => {
-    const current = document.querySelector(selector);
-    if (!current) return;
-    observer.disconnect();
-    window.clearTimeout(deadline);
-    run(current);
-  });
-  const deadline = window.setTimeout(() => observer.disconnect(), 12000);
-  observer.observe(document.body, { subtree: true, childList: true });
+export function observeAppTree(
+  observer: MutationObserver,
+  root: Element | null,
+): void {
+  observer.disconnect();
+  if (!root?.parentNode)
+    observer.observe(document, { childList: true, subtree: true });
+  for (let parent = root?.parentNode; parent; parent = parent.parentNode)
+    observer.observe(parent, { childList: true });
 }
 
-export function navigation(run: () => void): void {
+function syncApp(): void {
+  const next = root?.isConnected ? root : document.querySelector(selector);
+  if (root === next) {
+    if (root && observer) observeAppTree(observer, root);
+    return;
+  }
+  lifetime?.abort();
+  root = next;
+  lifetime = next ? new AbortController() : undefined;
+  if (observer) observeAppTree(observer, root);
+  if (next && lifetime) for (const run of consumers) run(next, lifetime.signal);
+}
+
+export function app(run: AppConsumer): void {
+  if (!observer) {
+    observer = new MutationObserver(syncApp);
+    root = document.querySelector(selector);
+    if (root) lifetime = new AbortController();
+    observeAppTree(observer, root);
+  }
+  consumers.add(run);
+  if (root && lifetime) run(root, lifetime.signal);
+}
+
+export function navigation(run: () => void, signal: AbortSignal): void {
   if (mobile) {
     for (const event of ["state-navigateend", "updateui", "popstate"])
-      window.addEventListener(event, run);
+      window.addEventListener(event, run, { signal });
   } else {
     for (const event of ["yt-navigate-finish", "yt-page-type-changed"])
-      document.addEventListener(event, run, true);
-    window.addEventListener("popstate", run);
+      document.addEventListener(event, run, { capture: true, signal });
+    window.addEventListener("popstate", run, { signal });
   }
 }
 

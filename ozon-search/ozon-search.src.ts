@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ozon - Rating and Review Filters
 // @namespace    https://github.com/sashokey/browser-userscripts
-// @version      1.1.5
+// @version      1.1.6
 // @description  Violentmonkey: adds rating and review ranges and a 30-minute delivery switch for Ozon Fresh. Filters loaded and newly loaded products.
 // @match        https://www.ozon.ru/*
 // @match        https://ozon.ru/*
@@ -20,9 +20,14 @@
   const PRICE = '[filter-key="currency_price"], [filterkey="currency_price"]';
   const GRID = '[data-widget="tileGridDesktop"]';
   const CARD = GRID + ' .tile-root';
+  const FILTERS = '[data-widget="filtersDesktop"]';
+  const SEARCH = '[data-widget="searchBarDesktop"]';
+  const FRESH_FLAG = '[title="Ozon fresh"]';
+  const WIDGETS = [FILTERS, GRID, SEARCH].join(', ');
   interface Panel {
     root: HTMLElement;
     price: HTMLElement;
+    range: HTMLElement;
     inputs: HTMLInputElement[];
     error: HTMLElement;
     offset: number;
@@ -41,7 +46,7 @@
   const panels = new Map<HTMLElement, Panel>(), cards = new Map<HTMLElement, Metrics>(), grids = new Set<HTMLElement>(), dirty = new Set<ParentNode>([document]);
   let context: string | undefined;
   let values = ['', '5', '', ''];
-  let draft: { offset: number; values: string[] } | null = null;
+  let draft: { offset: number; values: string[]; due?: number } | null = null;
   let focus: { offset: number; index: number; start: number | null; end: number | null } | null = null;
   let frame = 0, timer: number | undefined, serial = 0;
   let activeRoot: HTMLElement | null = null;
@@ -96,21 +101,27 @@
     if (/^\/(?:product|cart|my)(?:\/|$)/.test(url.pathname)) return false;
     return url.searchParams.get('miniapp') === 'supermarket'
       || url.pathname === '/category/supermarket-25000/'
-      || !!document.querySelector('[data-widget="searchBarDesktop"] [title="Ozon fresh"]');
+      || !!document.querySelector(SEARCH + ' ' + FRESH_FLAG);
   }
 
   function mountDelivery() {
     const anchors = new Map<HTMLElement, boolean>();
     if (isFresh()) {
-      for (const widget of document.querySelectorAll<HTMLElement>('[data-widget="filtersDesktop"]')) {
+      for (const widget of document.querySelectorAll<HTMLElement>(FILTERS)) {
         const panel = [...panels.values()].find(p => p.offset === 2 && p.root.isConnected && widget.contains(p.root));
         anchors.set(panel?.root || widget, !panel);
       }
     }
     for (const [root, panel] of deliveryPanels) {
-      if (!root.isConnected || !anchors.has(panel.anchor)) {
+      const prepend = anchors.get(panel.anchor);
+      if (!root.isConnected || prepend === undefined) {
         root.remove();
         deliveryPanels.delete(root);
+      } else if (root !== (prepend ? panel.anchor.firstElementChild : panel.anchor.nextElementSibling)) {
+        const focused = document.activeElement === panel.input;
+        if (prepend) panel.anchor.prepend(root);
+        else panel.anchor.after(root);
+        if (focused) panel.input.focus({ preventScroll: true });
       }
     }
     for (const [anchor, prepend] of anchors) {
@@ -203,8 +214,13 @@
 
   function syncContext() {
     const url = new URL(location.href);
-    const next = url.pathname + '?' + ['text', 'miniapp'].map(k => url.searchParams.get(k) || '').join('&');
+    if (!window.navigation) lastUrl = url.href;
+    const text = url.searchParams.get('text') ?? '';
+    const miniapp = url.searchParams.get('miniapp') ?? '';
+    const legacy = url.pathname + '?' + text + '&' + miniapp;
+    const next = url.pathname + '?' + new URLSearchParams({ text, miniapp }).toString();
     if (context === next) return;
+    const initial = context === undefined;
     context = next;
     knownDelivery.clear();
     pendingCart.clear();
@@ -216,11 +232,14 @@
     try {
       const stored = sessionStorage.getItem(ID);
       const saved: unknown = stored === null ? null : JSON.parse(stored);
-      if (typeof saved === 'object' && saved !== null && 'context' in saved && saved.context === context && 'values' in saved && Array.isArray(saved.values) && [2, 4].includes(saved.values.length) && saved.values.every(v => typeof v === 'string')) {
+      if (typeof saved === 'object' && saved !== null && 'context' in saved && typeof saved.context === 'string' && 'values' in saved && Array.isArray(saved.values) && [2, 4].includes(saved.values.length) && saved.values.every(v => typeof v === 'string')) {
         const strings = saved.values.filter((v): v is string => typeof v === 'string');
         const next = strings.length === 2 ? [...strings, '', ''] : strings;
         const [a = NaN, b = NaN, c = NaN, d = NaN] = next.map(parse);
-        if (a <= b && c <= d) values = next;
+        if (a <= b && c <= d) {
+          if (initial && (saved.context === context || saved.context === legacy)) values = next;
+          if (!initial || saved.context !== context) save();
+        }
       }
     } catch {}
     clearTimeout(timer);
@@ -255,12 +274,25 @@
     validate(panel, false);
   }
 
+  function scheduleDraft(panel: Panel) {
+    const pending = draft;
+    if (pending?.offset !== panel.offset || pending.due === undefined) return;
+    clearTimeout(timer);
+    timer = window.setTimeout(() => {
+      if (draft === pending) commit(panel, false);
+    }, Math.max(0, pending.due - Date.now()));
+  }
+
   function commit(panel: Panel, normalize: boolean) {
+    if (panels.get(panel.root) !== panel || !panel.root.isConnected || !panel.price.contains(panel.range) || !validPrice(panel.range)) return;
     if (panel.inputs.some(input => input.disabled || input.readOnly)) return;
     const nums = validate(panel, normalize);
     if (!nums) return;
     values.splice(panel.offset, 2, ...nums.map((n, i) => (panel.offset || !i) && !panel.inputs[i]?.value.trim() ? '' : String(n)));
-    if (normalize && draft?.offset === panel.offset) draft = null;
+    if (draft?.offset === panel.offset) {
+      if (normalize) draft = null;
+      else delete draft.due;
+    }
     save();
     for (const other of panels.values()) {
       if (other.offset === panel.offset && (normalize || other !== panel && !other.root.contains(document.activeElement))) restore(other);
@@ -287,7 +319,10 @@
       draft = { offset: panel.offset, values: panel.inputs.map(input => input.value) };
       focus = { offset: panel.offset, index: panel.inputs.indexOf(input), start: input.selectionStart, end: input.selectionEnd };
       clearTimeout(timer);
-      if (!(event instanceof InputEvent && event.isComposing) && validate(panel, false)) timer = window.setTimeout(() => commit(panel, false), 450);
+      if (!(event instanceof InputEvent && event.isComposing) && validate(panel, false)) {
+        draft.due = Date.now() + 450;
+        scheduleDraft(panel);
+      }
     }
     if (event.type === 'focusout') {
       const previous = focus;
@@ -321,8 +356,12 @@
     }
   }
 
+  function validPrice(range: Element): boolean {
+    return range.matches(PRICE) && range.querySelectorAll('input[type="text"]').length === 2;
+  }
+
   function mount(range: HTMLElement) {
-    if (range.closest('[data-ozr]') || range.querySelectorAll('input[type="text"]').length !== 2) return;
+    if (range.closest('[data-ozr]') || !validPrice(range)) return;
     let block = range.parentElement;
     const widget = range.closest('[data-widget]');
     while (block && block !== widget && !/^Цена(?:\s|$)/.test(block.firstElementChild?.textContent?.trim() || '')) block = block.parentElement;
@@ -332,7 +371,7 @@
   }
 
   function mountPanel(range: HTMLElement, block: HTMLElement, anchor: HTMLElement, offset: number): HTMLElement {
-    let panel = [...panels.values()].find(p => p.price === block && p.offset === offset && p.root.isConnected);
+    let panel = [...panels.values()].find(p => p.price === block && p.range === range && p.offset === offset && p.root.isConnected);
     if (!panel) {
       const root = block.cloneNode(false);
       if (!(root instanceof HTMLElement)) return anchor;
@@ -380,7 +419,7 @@
         if (field) field.dataset.ozrField = '';
       });
       root.append(heading, body, error);
-      panel = { root, price: block, inputs, error, offset };
+      panel = { root, price: block, range, inputs, error, offset };
       panels.set(root, panel);
       restore(panel);
       if (draft?.offset === offset) {
@@ -392,6 +431,15 @@
         const saved = focus, input = inputs[saved.index];
         input?.focus({ preventScroll: true });
         input?.setSelectionRange(saved.start, saved.end);
+      }
+      scheduleDraft(panel);
+    } else if (panel.root.previousElementSibling !== anchor) {
+      const focused = panel.inputs.find(input => input === document.activeElement);
+      const start = focused?.selectionStart ?? null, end = focused?.selectionEnd ?? null;
+      anchor.after(panel.root);
+      if (focused) {
+        focused.focus({ preventScroll: true });
+        focused.setSelectionRange(start, end);
       }
     }
     [...range.querySelectorAll<HTMLInputElement>('input[type="text"]')].forEach((input, i) => {
@@ -425,20 +473,23 @@
 
   function apply() {
     const [lo = 0, hi = 5, min = 0, max = Infinity] = values.map(parse);
-    const rated = lo > 0 || hi < 5, reviewed = min > 0 || max < Infinity;
+    const rated = panels.size > 0 && (lo > 0 || hi < 5);
+    const reviewed = panels.size > 0 && (min > 0 || max < Infinity);
     const delivery = freshOnly && isFresh() && deliveryPanels.size > 0;
     const active = rated || reviewed || delivery;
+    const heights = new Map<HTMLElement, number>();
+    const populated = new Set<HTMLElement>();
+    for (const [card, { grid }] of cards) {
+      if (!card.isConnected || !card.matches(CARD)) { card.removeAttribute('data-ozr-hidden'); cards.delete(card); measureGrids.add(grid); continue; }
+      populated.add(grid);
+      if (active && (!grids.has(grid) || measureGrids.has(grid))) heights.set(grid, 0);
+    }
     for (const grid of grids) {
-      if (!active || !grid.isConnected) {
+      if (!active || !populated.has(grid)) {
         grid.removeAttribute('data-ozr-grid');
         grid.style.removeProperty('--ozr-height');
         grids.delete(grid);
       }
-    }
-    const heights = new Map<HTMLElement, number>();
-    for (const [card, { grid }] of cards) {
-      if (!card.isConnected || !card.matches(CARD)) { card.removeAttribute('data-ozr-hidden'); cards.delete(card); measureGrids.add(grid); continue; }
-      if (active && (!grids.has(grid) || measureGrids.has(grid))) heights.set(grid, 0);
     }
     for (const [card, { grid }] of cards) {
       if (heights.has(grid)) card.removeAttribute('data-ozr-hidden');
@@ -483,7 +534,10 @@
     frame = 0;
     syncContext();
     for (const [root, panel] of panels) {
-      if (!root.isConnected || !panel.price.isConnected) { root.remove(); panels.delete(root); }
+      if (!root.isConnected || !panel.price.isConnected || !panel.price.contains(panel.range) || !validPrice(panel.range)) {
+        root.remove();
+        panels.delete(root);
+      }
     }
     for (const scope of dirty) {
       if (scope instanceof Node && scope !== document && !scope.isConnected) continue;
@@ -515,19 +569,32 @@
     for (const record of records) {
       const target = record.target instanceof Element ? record.target : record.target.parentElement;
       if (!target || target.closest('[data-ozr], [data-ozr-empty]')) continue;
-      const widget = target.closest<HTMLElement>('[data-widget="filtersDesktop"]');
-      const card = target.closest<HTMLElement>(CARD);
+      const search = target.closest<HTMLElement>(SEARCH);
+      if (search) {
+        if (record.attributeName === 'title' || [...record.addedNodes, ...record.removedNodes].some(node => node instanceof Element && (node.matches(FRESH_FLAG) || node.querySelector(FRESH_FLAG)))) schedule(search);
+        continue;
+      }
+      const widget = target.closest<HTMLElement>(FILTERS);
+      const card = target instanceof HTMLElement && cards.has(target) ? target : target.closest<HTMLElement>(CARD);
+      const grid = target.closest(GRID);
       if (widget) schedule(widget);
       else if (card) schedule(card);
+      else if (grid && target !== grid && record.type === 'attributes') schedule(target);
       else for (const node of record.addedNodes) if (node instanceof HTMLElement) schedule(node);
-      if (record.removedNodes.length && target.closest(GRID)) schedule(target);
+      if (record.removedNodes.length && grid) schedule(target);
     }
   });
   const structureObserver = new MutationObserver(records => {
     for (const record of records) {
       const target = record.target instanceof Element ? record.target : record.target.parentElement;
       if (target?.closest('[data-ozr], [data-ozr-empty]')) continue;
-      const changed = [...record.addedNodes, ...record.removedNodes].some(node => node instanceof Element && !node.matches('[data-ozr], [data-ozr-empty]') && (node.matches(PRICE + ', ' + GRID + ', [data-widget="filtersDesktop"]') || !!node.querySelector(PRICE + ', ' + GRID + ', [data-widget="filtersDesktop"]')));
+      if (record.type === 'attributes') {
+        if (record.attributeName === 'data-widget') { observeWidgets(); schedule(document); }
+        else if (target && (target.matches(GRID) || target.querySelector(GRID))) schedule(target);
+        continue;
+      }
+      const selector = PRICE + ', ' + WIDGETS;
+      const changed = [...record.addedNodes, ...record.removedNodes].some(node => node instanceof Element && !node.matches('[data-ozr], [data-ozr-empty]') && (node.matches(selector) || !!node.querySelector(selector)));
       if (changed) { observeWidgets(); schedule(document); }
     }
   });
@@ -535,14 +602,23 @@
   function observeWidgets() {
     widgetObserver.disconnect();
     if (!activeRoot) return;
-    for (const widget of activeRoot.querySelectorAll('[data-widget="filtersDesktop"], ' + GRID)) {
-      widgetObserver.observe(widget, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['disabled', 'readonly', 'href', 'hidden', 'aria-hidden', 'style'] });
+    for (const widget of activeRoot.querySelectorAll(WIDGETS)) {
+      widgetObserver.observe(widget, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['disabled', 'readonly', 'href', 'hidden', 'aria-hidden', 'style', 'filter-key', 'filterkey', 'type', 'title', 'class'] });
     }
   }
 
   const rootObserver = new MutationObserver(() => {
-    if (document.getElementById('layoutPage') !== activeRoot) start();
+    if (document.getElementById('__ozon') !== routeRoot || document.getElementById('layoutPage') !== activeRoot) start();
+    else observeRoots();
   });
+
+  function observeRoots(): void {
+    rootObserver.disconnect();
+    const anchor = activeRoot ?? routeRoot;
+    if (!activeRoot) rootObserver.observe(anchor ?? document, { childList: true, subtree: true });
+    for (let parent = anchor?.parentNode; parent; parent = parent.parentNode)
+      rootObserver.observe(parent, { childList: true });
+  }
 
   function stop(keepRootObserver = false) {
     if (!keepRootObserver) { rootObserver.disconnect(); routeRoot = null; }
@@ -576,16 +652,16 @@
     if (app !== routeRoot) {
       stop();
       routeRoot = app;
-      if (app) rootObserver.observe(app, { childList: true });
     }
     const root = document.getElementById('layoutPage');
-    if (!root) { stop(true); return; }
+    if (!root) { stop(true); observeRoots(); return; }
     if (activeRoot !== root) {
       stop(true);
       activeRoot = root;
-      structureObserver.observe(root, { childList: true, subtree: true });
+      structureObserver.observe(root, { childList: true, subtree: true, attributeFilter: ['data-widget', 'class', 'hidden', 'aria-hidden'] });
       observeWidgets();
     }
+    observeRoots();
     schedule(root);
   }
 
@@ -599,11 +675,21 @@
     if (location.href === lastUrl) return;
     lastUrl = location.href;
     stop();
+    syncContext();
     frame = requestAnimationFrame(() => { frame = 0; start(); });
   };
+  const legacyNavigation = window.navigation ? undefined : new MutationObserver(navigate);
   if (window.navigation) window.navigation.addEventListener('currententrychange', navigate);
   else addEventListener('popstate', navigate);
-  addEventListener('pageshow', start);
-  addEventListener('pagehide', () => { stop(); });
-  start();
+  const resume = () => {
+    legacyNavigation?.observe(document, { childList: true, subtree: true, characterData: true, attributeFilter: ['hidden', 'aria-hidden', 'class', 'style', 'id', 'data-widget'] });
+    start();
+  };
+  addEventListener('pageshow', resume);
+  addEventListener('pagehide', () => {
+    legacyNavigation?.disconnect();
+    stop();
+  });
+  syncContext();
+  resume();
 })();

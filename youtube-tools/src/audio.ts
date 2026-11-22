@@ -50,7 +50,7 @@ function callable(value: unknown): value is Callable {
 }
 
 export function audio(): void {
-  const patches = new WeakMap<object, Set<string>>();
+  const patches = new WeakMap<object, Map<string, () => unknown>>();
   const wrappers = new WeakSet<object>();
   const audioPreloads = new WeakMap<object, Set<string> | true>();
 
@@ -61,9 +61,10 @@ export function audio(): void {
   ): void {
     if (!object(owner)) return;
     const previous = patches.get(owner);
-    if (previous?.has(key)) return;
     try {
       const descriptor = Object.getOwnPropertyDescriptor(owner, key);
+      const installed = previous?.get(key);
+      if (installed && descriptor?.get === installed) return;
       if (
         descriptor &&
         (!descriptor.configurable ||
@@ -84,16 +85,31 @@ export function audio(): void {
         if (!inherited?.writable) return;
       }
       let value: unknown = transform(Reflect.get(owner, key));
+      const get = () => value;
       Object.defineProperty(owner, key, {
         configurable: true,
         enumerable: descriptor?.enumerable ?? inherited?.enumerable ?? true,
-        get: () => value,
-        set(next: unknown) {
-          value = transform(next);
+        get,
+        set(this: object, next: unknown) {
+          if (this === owner) {
+            value = transform(next);
+            return;
+          }
+          const own = Object.getOwnPropertyDescriptor(this, key);
+          if (!own) {
+            Object.defineProperty(this, key, {
+              value: next,
+              configurable: true,
+              enumerable: true,
+              writable: true,
+            });
+          } else if (own.writable) {
+            Object.defineProperty(this, key, { value: next });
+          }
         },
       });
-      const keys = previous ?? new Set<string>();
-      keys.add(key);
+      const keys = previous ?? new Map<string, () => unknown>();
+      keys.set(key, get);
       patches.set(owner, keys);
     } catch {}
   }
@@ -144,7 +160,7 @@ export function audio(): void {
                 }
                 if (
                   current ||
-                  saturated ||
+                  (saturated && !Reflect.has(params, "audio_only")) ||
                   (videoId && tracked?.has(videoId))
                 ) {
                   const updated = withProperty(params, "audio_only", current);

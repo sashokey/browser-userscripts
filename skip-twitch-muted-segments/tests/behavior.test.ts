@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import { chromium } from 'playwright';
 import type { Browser } from 'playwright';
-import { artifacts, withPlayer, segment, seek, assertTime } from './browser.ts';
+import { artifacts, withPlayer, playerHtml, ready, segment, seek, assertTime } from './browser.ts';
 
 let browser: Browser;
 before(async () => { browser = await chromium.launch({ headless: true, args: ['--mute-audio'] }); });
@@ -67,16 +67,41 @@ for (const artifact of artifacts) {
     await assertTime(page, 1.19, 1.4);
   }, { segments: segment('10%', '10%', 'rgba(255, 0, 0, 0)') }));
 
+  void test(`${artifact}: ignores a red segment removed from layout`, () => withPlayer(browser, artifact, async page => {
+    await seek(page, 1.2);
+    await page.waitForTimeout(180);
+    await assertTime(page, 1.19, 1.4);
+  }, { segments: segment('10%', '10%').replace('style="', 'style="display:none;') }));
+
+  void test(`${artifact}: ignores a completely transparent red marker`, () => withPlayer(browser, artifact, async page => {
+    await seek(page, 1.2);
+    await page.waitForTimeout(180);
+    await assertTime(page, 1.19, 1.4);
+  }, { segments: segment('10%', '10%').replace('style="', 'style="opacity:0;') }));
+
   void test(`${artifact}: clips the final seek to the recording end`, () => withPlayer(browser, artifact, async page => {
     await seek(page, 9.2);
     await assertTime(page, 9.99, 10);
   }, { segments: segment('90%', '10%') }));
 
-  void test(`${artifact}: waits for the new recording after SPA navigation`, () => withPlayer(browser, artifact, async page => {
+  void test(`${artifact}: waits for the new recording and its seekbar after SPA navigation`, () => withPlayer(browser, artifact, async page => {
     await page.evaluate(() => history.pushState({}, '', '/videos/987654'));
     await seek(page, 1.2);
-    await page.waitForTimeout(180);
-    await assertTime(page, 1.19, 1.4);
+    await page.waitForTimeout(1350);
+    await assertTime(page, 1.19, 1.42);
+    await page.evaluate(html => {
+      const oldVideo = document.querySelector('video');
+      const oldBar = document.querySelector('[data-a-target="player-seekbar"]');
+      const template = document.createElement('template');
+      template.innerHTML = html;
+      const newVideo = template.content.querySelector('video');
+      const newBar = template.content.querySelector('[data-a-target="player-seekbar"]');
+      if (!oldVideo || !oldBar || !newVideo || !newBar) throw new Error('Missing fixture timeline');
+      oldVideo.replaceWith(newVideo);
+      oldBar.replaceChildren(...newBar.childNodes);
+    }, playerHtml());
+    await ready(page);
+    await seek(page, 1.2);
     await assertTime(page, 2.09, 2.4);
   }));
 
@@ -85,4 +110,28 @@ for (const artifact of artifacts) {
     await seek(page, 1.2);
     await assertTime(page, 2.09, 2.4);
   }, { segments: '' }));
+
+  void test(`${artifact}: accepts a native recording that loads before the route changes`, () => withPlayer(browser, artifact, async page => {
+    await page.evaluate(html => {
+      const video = document.querySelector('video');
+      const seekbar = document.querySelector('[data-a-target="player-seekbar"]');
+      const template = document.createElement('template');
+      template.innerHTML = html;
+      const nextVideo = template.content.querySelector('video');
+      const nextBar = template.content.querySelector('[data-a-target="player-seekbar"]');
+      if (!video || !seekbar || !nextVideo || !nextBar) throw new Error('Missing fixture timeline');
+      const root: { stateNode: { current?: object } } = { stateNode: {} };
+      root.stateNode.current = root;
+      Object.defineProperty(seekbar, '__reactFiber$fixture', {
+        enumerable: true,
+        value: { return: root, memoizedProps: { vodID: '987654' } },
+      });
+      seekbar.replaceChildren(...nextBar.childNodes);
+      video.replaceWith(nextVideo);
+    }, playerHtml());
+    await ready(page);
+    await page.evaluate(() => history.pushState({}, '', '/videos/987654'));
+    await seek(page, 1.2);
+    await assertTime(page, 2.09, 2.4);
+  }));
 }

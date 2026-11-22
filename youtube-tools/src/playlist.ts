@@ -180,14 +180,9 @@ function preventNativeAdvance(manager: Element): Suppression | undefined {
     const previous =
       typeof nativeState === "boolean" ? nativeState : readManagerState();
     if (applied && previous === false) return true;
-    if (!write(false)) return false;
-    const current = readState();
-    if (
-      current !== false &&
-      (typeof previous === "boolean" || current === true)
-    )
+    if (typeof previous !== "boolean" || !write(false) || readState() !== false)
       return false;
-    if (previous === true && current === false) readSuppressedState = readState;
+    if (previous) readSuppressedState = readState;
     applied = true;
     return true;
   }
@@ -207,7 +202,7 @@ function preventNativeAdvance(manager: Element): Suppression | undefined {
   };
 }
 
-function desktop(root: Element): void {
+function desktop(root: Element, signal: AbortSignal): void {
   let manager: Element | null = null;
   let controller: unknown;
   let suppression: Suppression | undefined;
@@ -234,6 +229,7 @@ function desktop(root: Element): void {
   }
 
   function check(): void {
+    if (signal.aborted) return;
     if (!playlistWatch()) {
       observer.disconnect();
       watching = false;
@@ -268,11 +264,23 @@ function desktop(root: Element): void {
         preventAdvance(manager);
   }
 
-  navigation(check);
-  window.addEventListener("yt-navigate-finish", (event) => {
-    if (event.eventPhase === Event.AT_TARGET) check();
-  });
-  document.addEventListener("ended", check, true);
+  navigation(check, signal);
+  window.addEventListener(
+    "yt-navigate-finish",
+    (event) => {
+      if (event.eventPhase === Event.AT_TARGET) check();
+    },
+    { signal },
+  );
+  document.addEventListener("ended", check, { capture: true, signal });
+  signal.addEventListener(
+    "abort",
+    () => {
+      observer.disconnect();
+      restore();
+    },
+    { once: true },
+  );
   void customElements.whenDefined("yt-playlist-manager").then(check);
   check();
 }

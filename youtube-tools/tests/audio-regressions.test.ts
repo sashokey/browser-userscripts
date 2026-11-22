@@ -95,6 +95,42 @@ void test("an inherited read-only native factory stays protected", () => {
   assert.equal(Object.hasOwn(application, "create"), false);
 });
 
+void test("assigning a factory on a derived application leaves the base factory intact", () => {
+  const application = { create: () => "base" };
+  install(application, false);
+  const derived: unknown = Object.create(application);
+  assert.ok(derived && typeof derived === "object");
+  const replacement = () => "derived";
+  assert.equal(Reflect.set(derived, "create", replacement), true);
+  assert.equal(Object.hasOwn(derived, "create"), true);
+  assert.equal(Reflect.get(derived, "create"), replacement);
+  assert.equal(application.create(), "base");
+});
+
+void test("returning the same player hooks a transport method redefined by YouTube", () => {
+  const received: unknown[] = [];
+  const player = {
+    loadVideoByPlayerVars: (value: object) => received.push(value),
+  };
+  const application = { create: () => player };
+  install(application);
+  application.create().loadVideoByPlayerVars({ videoId });
+  Object.defineProperty(player, "loadVideoByPlayerVars", {
+    configurable: true,
+    writable: true,
+    value: (value: object) => received.push(value),
+  });
+  application.create().loadVideoByPlayerVars({ videoId });
+  assert.deepEqual(
+    received.map((entry): unknown =>
+      entry && typeof entry === "object"
+        ? Reflect.get(entry, "audio_only")
+        : undefined,
+    ),
+    [true, true],
+  );
+});
+
 void test("a throwing config.args getter leaves native player creation usable", () => {
   const config = {
     get args(): never {
@@ -438,4 +474,19 @@ void test("a stock load that cannot override audio leaves the preload available 
     player.loadVideoByPlayerVars({ video_id: videoId }).audio_only,
     undefined,
   );
+});
+
+void test("bounded preload recovery preserves an explicit audio choice in a native call", () => {
+  const player = {
+    preloadVideoByPlayerVars: (args: NativeArgs) => args.audio_only,
+    loadVideoByPlayerVars: (args: NativeArgs) => args,
+  };
+  const application = { create: () => player };
+  const disableAudio = install(application);
+  application.create();
+  for (let index = 0; index < 300; index++)
+    player.preloadVideoByPlayerVars({ video_id: `preloaded-${index}` });
+  disableAudio();
+  const native = { video_id: "different-native-video", audio_only: true };
+  assert.equal(player.loadVideoByPlayerVars(native), native);
 });

@@ -12,11 +12,6 @@ const playlist = "/watch?v=abcdefghijk&list=RDabcdefghijk";
 const ordinary = "/watch?v=lmnopqrstuv";
 const stateChange = "player-state-change";
 
-class MutationObserver {
-  observe(): void {}
-  disconnect(): void {}
-}
-
 class NativeVideo extends EventTarget {
   readonly HAVE_CURRENT_DATA = 2;
   isConnected = true;
@@ -66,11 +61,27 @@ function start(
     },
   });
   Object.defineProperty(window, "top", { value: window });
-  const root = Object.assign(new EventTarget(), {
-    querySelector: (selector: string) =>
-      selector === "yt-playlist-manager" ? (manager ?? null) : null,
-    querySelectorAll: () => [],
-  });
+  const observations = new Map<MutationObserver, object>();
+  class MutationObserver {
+    readonly callback: (records: MutationRecord[]) => void;
+    constructor(callback: (records: MutationRecord[]) => void) {
+      this.callback = callback;
+    }
+    observe(target: object): void {
+      observations.set(this, target);
+    }
+    disconnect(): void {
+      observations.delete(this);
+    }
+  }
+  const newRoot = (manager: object | undefined) =>
+    Object.assign(new EventTarget(), {
+      isConnected: true,
+      querySelector: (selector: string) =>
+        selector === "yt-playlist-manager" ? (manager ?? null) : null,
+      querySelectorAll: () => [],
+    });
+  let root = newRoot(manager);
   const document = Object.assign(new EventTarget(), {
     readyState: "complete",
     querySelector: (selector: string) =>
@@ -86,6 +97,7 @@ function start(
     URLSearchParams,
     Event,
     CustomEvent,
+    AbortController,
     HTMLVideoElement: NativeVideo,
     MutationObserver,
     unsafeWindow: window,
@@ -96,6 +108,12 @@ function start(
   });
   return {
     window,
+    replaceManager(manager: object) {
+      root.isConnected = false;
+      root = newRoot(manager);
+      for (const [observer, target] of [...observations])
+        if (target === document) observer.callback([]);
+    },
     navigate(path: string, event = "popstate") {
       location.href = new URL(path, location).href;
       window.dispatchEvent(new Event(event));
@@ -133,7 +151,13 @@ class NativePlaylist {
   }
 }
 
-void test("desktop disables autoplay through TEST_ONLY using its native receiver", () => {
+class ReadablePlaylist extends NativePlaylist {
+  getCanAutoAdvance(): boolean {
+    return this.shouldAdvance;
+  }
+}
+
+void test("desktop leaves write-only TEST_ONLY autoplay state intact", () => {
   const native = new NativePlaylist();
   const page = start("www.youtube.com", playlist, {
     polymerController: {},
@@ -142,19 +166,25 @@ void test("desktop disables autoplay through TEST_ONLY using its native receiver
       throw new Error("Autoplay state is unavailable");
     },
   });
-  assert.equal(native.shouldAdvance, false);
+  assert.equal(native.shouldAdvance, true);
 
   page.navigate(ordinary);
-  assert.equal(native.shouldAdvance, false);
+  assert.equal(native.shouldAdvance, true);
+});
+
+void test("desktop releases the old controller and suppresses the replacement app", () => {
+  const first = { canAutoAdvance_: true };
+  const second = { canAutoAdvance_: true };
+  const page = start("www.youtube.com", playlist, { polymerController: first });
+  assert.equal(first.canAutoAdvance_, false);
+  page.replaceManager({ polymerController: second });
+  assert.equal(first.canAutoAdvance_, true);
+  assert.equal(second.canAutoAdvance_, false);
+  page.navigate(ordinary);
+  assert.equal(second.canAutoAdvance_, true);
 });
 
 void test("desktop restores TEST_ONLY autoplay state through its own getter", () => {
-  class ReadablePlaylist extends NativePlaylist {
-    getCanAutoAdvance(): boolean {
-      return this.shouldAdvance;
-    }
-  }
-
   const native = new ReadablePlaylist();
   const page = start("www.youtube.com", playlist, { TEST_ONLY: native });
   assert.equal(native.shouldAdvance, false);
@@ -248,8 +278,8 @@ void test("desktop falls back to the manager flag when the controller has no fla
 });
 
 void test("desktop uses TEST_ONLY when the controller setter leaves autoplay enabled", () => {
-  const native = new NativePlaylist();
-  start("www.youtube.com", playlist, {
+  const native = new ReadablePlaylist();
+  const page = start("www.youtube.com", playlist, {
     polymerController: {
       get canAutoAdvance_(): boolean {
         return true;
@@ -259,6 +289,8 @@ void test("desktop uses TEST_ONLY when the controller setter leaves autoplay ena
     TEST_ONLY: native,
   });
   assert.equal(native.shouldAdvance, false);
+  page.navigate(ordinary);
+  assert.equal(native.shouldAdvance, true);
 });
 
 void test("desktop uses the manager flag when the TEST_ONLY setter leaves autoplay enabled", () => {

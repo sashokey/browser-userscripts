@@ -49,7 +49,7 @@ export function watched(): void {
   GM_addStyle(
     `[data-ytt-filter]:not([hidden]) :is(${cards}):not(:is(${panels},${collections}) *,:has(${collections})):not(${interacting}):has(:is(${progress})[${progressAttribute}]){display:none!important}`,
   );
-  app((root) => {
+  app((root, signal) => {
     const active = new Set<Element>();
     let observingViews = false;
     const changes = new MutationObserver((records) => {
@@ -102,7 +102,7 @@ export function watched(): void {
 
     const views = new MutationObserver((records) => {
       if (
-        [...active].some((node) => !node.isConnected) ||
+        [...active].some((node) => !root.contains(node)) ||
         records.some(
           (record) =>
             (record.type === "attributes" &&
@@ -117,8 +117,18 @@ export function watched(): void {
       )
         sync();
     });
-    navigation(sync);
-    listen("showWatched", sync);
+    navigation(sync, signal);
+    listen("showWatched", sync, signal);
+    signal.addEventListener(
+      "abort",
+      () => {
+        changes.disconnect();
+        views.disconnect();
+        for (const node of active) node.removeAttribute("data-ytt-filter");
+        active.clear();
+      },
+      { once: true },
+    );
     sync();
   });
 }

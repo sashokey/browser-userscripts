@@ -80,7 +80,11 @@ async function trackResources(page: Page) {
     const interval = window.setInterval.bind(window);
     const clear = window.clearInterval.bind(window);
     Reflect.defineProperty(window, 'setInterval', { value: function (callback: TimerHandler, timeout?: number, ...args: unknown[]) {
-      const id: unknown = Reflect.apply(interval, window, [callback, timeout, ...args]);
+      const counted = typeof callback === 'function' ? (...values: unknown[]) => {
+        resources.intervalTicks++;
+        Reflect.apply(callback, window, values);
+      } : callback;
+      const id: unknown = Reflect.apply(interval, window, [counted, timeout, ...args]);
       if (typeof id !== 'number') throw new Error('Invalid browser timer');
       resources.intervals.add(id);
       return id;
@@ -165,18 +169,131 @@ for (const artifact of ['compiled', 'user']) {
     assert.equal(await page.evaluate(() => { const saved: unknown = Reflect.get(window, 'originalHistoryMethods'); return Array.isArray(saved) && history.pushState === saved[0] && history.replaceState === saved[1]; }), true);
   }, { prepare: trackResources }));
 
-  void test(`${artifact}: responds to popstate without Navigation API support`, () => withListing(artifact, async page => {
+  void test(`${artifact}: responds to real Back and Forward without Navigation API support`, () => withListing(artifact, async page => {
     await input(page, 'Оценка от', '4.9');
     await page.evaluate(() => {
-      history.replaceState({}, '', '/category/fallback-456/');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      history.pushState({}, '', '/category/fallback-456/');
+      document.body.append(document.createElement('span'));
     });
+    await visibleCards(page, ['card101', 'card102', 'card103', 'card104', 'card105']);
+    await input(page, 'Оценка от', '4.9');
+    await page.evaluate(() => history.back());
+    await page.waitForURL('**/category/example-123/');
+    await visibleCards(page, ['card101', 'card102', 'card103', 'card104', 'card105']);
+    await input(page, 'Оценка от', '4.9');
+    await page.evaluate(() => history.forward());
+    await page.waitForURL('**/category/fallback-456/');
     await visibleCards(page, ['card101', 'card102', 'card103', 'card104', 'card105']);
     assert.equal((await resources(page)).intervals, 0);
   }, { prepare: async page => {
     await trackResources(page);
     await page.evaluate(() => { Object.defineProperty(window, 'navigation', { value: undefined, configurable: true }); });
   } }));
+
+  void test(`${artifact}: reconnects on a rendered SPA listing without the Navigation API`, () => withListing(artifact, async page => {
+    await input(page, 'Оценка от', '4.9');
+    await visibleCards(page, ['card104']);
+    await page.evaluate(() => {
+      history.pushState({}, '', '/product/example-101/');
+      document.body.replaceChildren();
+    });
+    await page.locator('[data-ozr]').first().waitFor({ state: 'detached' });
+    await page.evaluate(html => {
+      history.replaceState({}, '', '/category/returned-456/');
+      document.body.innerHTML = new DOMParser().parseFromString(html, 'text/html').body.innerHTML;
+    }, listing());
+    await input(page, 'Оценка от', '4.9');
+    await visibleCards(page, ['card104']);
+  }, { prepare: async page => {
+    await page.evaluate(() => { Object.defineProperty(window, 'navigation', { value: undefined, configurable: true }); });
+  } }));
+
+  void test(`${artifact}: discards an earlier rating filter when the same search returns`, () => withListing(artifact, async page => {
+    await input(page, 'Оценка от', '4.9');
+    await visibleCards(page, ['card104']);
+    await page.evaluate(() => { history.pushState({}, '', '?text=B'); });
+    await visibleCards(page, ['card101', 'card102', 'card103', 'card104', 'card105']);
+    await page.evaluate(() => { history.pushState({}, '', '?text=A'); });
+    await page.waitForFunction(() => document.querySelector<HTMLInputElement>('[aria-label="Оценка от"]')?.value === '');
+    await visibleCards(page, ['card101', 'card102', 'card103', 'card104', 'card105']);
+  }, { path: '/category/example-123/?text=A' }));
+
+  void test(`${artifact}: stops filtering while the native range loses its price role`, () => withListing(artifact, async page => {
+    await input(page, 'Оценка от', '4.9');
+    await visibleCards(page, ['card104']);
+    const price = page.locator('[filter-key="currency_price"]');
+    await price.evaluate(range => { range.setAttribute('filter-key', 'other'); });
+    await page.getByRole('spinbutton', { name: 'Оценка от', exact: true }).waitFor({ state: 'detached' });
+    await visibleCards(page, ['card101', 'card102', 'card103', 'card104', 'card105']);
+    await page.locator('[filter-key="other"]').evaluate(range => { range.setAttribute('filter-key', 'currency_price'); });
+    await page.getByRole('spinbutton', { name: 'Оценка от', exact: true }).waitFor();
+    await visibleCards(page, ['card104']);
+  }));
+
+  void test(`${artifact}: resets a search and finds its app after an intermediate empty route`, () => withListing(artifact, async page => {
+    await input(page, 'Оценка от', '4.9');
+    await visibleCards(page, ['card104']);
+    await page.evaluate(async () => {
+      history.pushState({}, '', '?text=B');
+      document.body.replaceChildren();
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      history.pushState({}, '', '?text=A');
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
+    await page.evaluate(html => {
+      document.body.innerHTML = new DOMParser().parseFromString(html, 'text/html').body.innerHTML;
+    }, listing());
+    const filter = page.getByRole('spinbutton', { name: 'Оценка от', exact: true });
+    await filter.waitFor();
+    assert.equal(await filter.inputValue(), '');
+    await visibleCards(page, ['card101', 'card102', 'card103', 'card104', 'card105']);
+  }, { path: '/category/example-123/?text=A' }));
+
+  void test(`${artifact}: releases reserved height when a grid becomes empty`, () => withListing(artifact, async page => {
+    await input(page, 'Оценка от', '4.9');
+    await visibleCards(page, ['card104']);
+    const grid = page.locator('[data-widget="tileGridDesktop"]');
+    assert.equal(await grid.getAttribute('data-ozr-grid'), '');
+    await grid.evaluate(element => element.replaceChildren());
+    await page.waitForFunction(() => !document.querySelector('[data-widget="tileGridDesktop"]')?.hasAttribute('data-ozr-grid'));
+  }));
+
+  void test(`${artifact}: applies the pending range after native price replacement`, () => withListing(artifact, async page => {
+    await page.getByRole('spinbutton', { name: 'Оценка от', exact: true }).fill('4.9');
+    await page.locator('[filter-key="currency_price"]').evaluate(range => range.replaceWith(range.cloneNode(true)));
+    await visibleCards(page, ['card104']);
+  }));
+
+  void test(`${artifact}: moves its controls with the existing native price block`, () => withListing(artifact, async page => {
+    await page.locator('[filter-key="currency_price"]').evaluate(range => {
+      const block = range.parentElement;
+      const widget = block?.parentElement;
+      if (!block || !widget) throw new Error('Missing native price block');
+      const wrapper = document.createElement('div');
+      widget.append(wrapper);
+      wrapper.append(block);
+    });
+    await page.waitForFunction(() => {
+      const block = document.querySelector('[filter-key="currency_price"]')?.parentElement;
+      return block?.nextElementSibling?.matches('[data-ozr]') &&
+        block.nextElementSibling?.nextElementSibling?.matches('[data-ozr]') &&
+        block.nextElementSibling?.nextElementSibling?.nextElementSibling?.matches('[data-ozr-delivery]');
+    });
+  }, { path: '/category/example-123/?miniapp=supermarket' }));
+
+  void test(`${artifact}: reevaluates a Fresh delivery label hidden by a class change`, () => withListing(artifact, async page => {
+    await page.addStyleTag({ content: '.fixture-hidden button { display: none }' });
+    await page.getByRole('switch', { name: 'За 30 минут' }).check();
+    await visibleCards(page, ['card101', 'card103', 'card104']);
+    await page.locator('#fixture-card-wrapper').evaluate(wrapper => wrapper.classList.add('fixture-hidden'));
+    await visibleCards(page, ['card103', 'card104']);
+  }, { path: '/category/example-123/?miniapp=supermarket', prepare: page => page.evaluate(() => {
+    const card = document.getElementById('card101');
+    const wrapper = document.createElement('div');
+    wrapper.id = 'fixture-card-wrapper';
+    card?.before(wrapper);
+    if (card) wrapper.append(card);
+  }) }));
 
   void test(`${artifact}: leaves all products visible before a filter is selected`, () => withListing(artifact, page => visibleCards(page, ['card101', 'card102', 'card103', 'card104', 'card105'])));
 

@@ -1,4 +1,4 @@
-Userscripts for desktop Ozon, Twitch recordings, and desktop and mobile YouTube. Requires [Violentmonkey](https://violentmonkey.github.io/).
+Userscripts for desktop Ozon, Twitch recordings, desktop and mobile YouTube, and YouTube Music. Requires [Violentmonkey](https://violentmonkey.github.io/).
 
 ## Installation
 
@@ -14,7 +14,7 @@ Automatically skips muted segments during Twitch recording playback. [Install Sk
 
 ### YouTube Tools
 
-Adds recommendation feedback, watched-video filtering, audio-only playback, and manual playlist advancement. [Install YouTube Tools](https://raw.githubusercontent.com/sashokey/browser-userscripts/master/youtube-tools/youtube-tools.user.js)
+Adds recommendation feedback, watched-video filtering, audio-only playback, and manual playlist advancement on YouTube. Filters music videos out of YouTube Music listings and playback. [Install YouTube Tools](https://raw.githubusercontent.com/sashokey/browser-userscripts/master/youtube-tools/youtube-tools.user.js)
 
 ## Usage notes
 

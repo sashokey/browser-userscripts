@@ -40,7 +40,7 @@ export async function withPlayer(browser: Browser, artifact: Artifact, run: (pag
   await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: html }));
   await page.addInitScript(() => {
     const resources = window.scriptResources = { listeners: 0, intervals: 0, scans: 0 };
-    const events = new Set(['timeupdate', 'playing', 'seeked', 'loadedmetadata', 'durationchange', 'popstate', 'pageshow']);
+    const events = new Set(['timeupdate', 'playing', 'seeking', 'seeked', 'loadedmetadata', 'durationchange', 'popstate', 'pageshow']);
     const addDocument = document.addEventListener.bind(document);
     document.addEventListener = (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void => {
       if (events.has(type)) resources.listeners++;

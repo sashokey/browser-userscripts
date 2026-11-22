@@ -20,9 +20,9 @@ export function musicRows(selectors: string): {
   let classified = 0;
   for (const row of document.querySelectorAll(selectors)) {
     const data = field(row, "data");
-    const endpoint =
-      field(data, "navigationEndpoint") ??
-      field(data, "onTap") ??
+    const endpoints = [
+      field(data, "navigationEndpoint"),
+      field(data, "onTap"),
       path(
         data,
         "flexColumns",
@@ -32,14 +32,25 @@ export function musicRows(selectors: string): {
         "runs",
         "0",
         "navigationEndpoint",
-      );
-    const kind = path(
-      endpoint,
-      "watchEndpoint",
-      "watchEndpointMusicSupportedConfigs",
-      "watchEndpointMusicConfig",
-      "musicVideoType",
-    );
+      ),
+    ].map((endpoint) => field(endpoint, "watchEndpoint"));
+    const id = [
+      field(data, "videoId"),
+      path(data, "playlistItemData", "videoId"),
+      ...endpoints.map((endpoint) => field(endpoint, "videoId")),
+    ].find((value) => typeof value === "string" && value.length > 0);
+    if (!id) continue;
+    const kind = endpoints
+      .filter((endpoint) => field(endpoint, "videoId") === id)
+      .map((endpoint) =>
+        path(
+          endpoint,
+          "watchEndpointMusicSupportedConfigs",
+          "watchEndpointMusicConfig",
+          "musicVideoType",
+        ),
+      )
+      .find((value) => typeof value === "string");
     if (typeof kind !== "string") continue;
     classified++;
     if (
@@ -47,7 +58,11 @@ export function musicRows(selectors: string): {
       getComputedStyle(row).visibility === "hidden"
     )
       continue;
-    if (kind === "MUSIC_VIDEO_TYPE_ATV") visibleTracks++;
+    if (
+      kind === "MUSIC_VIDEO_TYPE_ATV" ||
+      kind === "MUSIC_VIDEO_TYPE_PRIVATELY_OWNED_TRACK"
+    )
+      visibleTracks++;
     else visibleClips++;
   }
   return { visibleTracks, visibleClips, classified };
@@ -132,8 +147,9 @@ export function directClipIsBlocked(
   actual: ReturnType<typeof playbackType>,
   clipId: string,
 ): void {
-  assert.ok(
-    !actual.playing || actual.id !== clipId,
-    "The real player started the directly opened video",
+  assert.equal(
+    actual.playing,
+    false,
+    `Playback started after opening clip ${clipId}`,
   );
 }

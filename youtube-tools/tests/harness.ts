@@ -165,7 +165,7 @@ export async function candidate(
       throw error;
   }
   await context.addInitScript({
-    content: `if (/^(?:www|m)\\.youtube\\.com$/.test(location.hostname)) {(${gmForTest.toString()})(${JSON.stringify(initial)});\n${code}\n}`,
+    content: `if (/^(?:www|m|music)\\.youtube\\.com$/.test(location.hostname)) {(${gmForTest.toString()})(${JSON.stringify(initial)});\n${code}\n}`,
   });
 }
 

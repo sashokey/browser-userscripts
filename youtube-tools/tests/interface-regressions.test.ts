@@ -492,6 +492,27 @@ async function enterPreviewWithPointer(page: Page): Promise<void> {
   await player.locator(".ytt-action").first().waitFor();
 }
 
+void test("removing a preview and its card together cleans up the feedback panel", () =>
+  previewFixture(async (page) => {
+    await enterPreviewWithPointer(page);
+    const cleaned = await page.evaluate(async () => {
+      const card = document.querySelector("#video");
+      const host = document.querySelector("#video-preview");
+      const panel = host?.querySelector(".ytt-feedback");
+      if (!card || !host || !panel) throw new Error("Missing feedback preview");
+      card.remove();
+      host.remove();
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      return (
+        panel.parentElement === null &&
+        !card.classList.contains("ytt-feedback-card")
+      );
+    });
+    assert.equal(cleaned, true);
+  }));
+
 void test("feedback detaches from the preview when YouTube recycles its source card", () =>
   previewFixture(async (page) => {
     await enterPreviewWithPointer(page);

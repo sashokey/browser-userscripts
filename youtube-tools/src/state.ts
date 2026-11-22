@@ -38,6 +38,14 @@ export function flip(key: Setting): void {
   } catch {}
 }
 
-export function listen(key: Setting, run: () => void): void {
+export function listen(
+  key: Setting,
+  run: () => void,
+  signal?: AbortSignal,
+): void {
+  if (signal?.aborted) return;
   subscribers[key].add(run);
+  signal?.addEventListener("abort", () => subscribers[key].delete(run), {
+    once: true,
+  });
 }

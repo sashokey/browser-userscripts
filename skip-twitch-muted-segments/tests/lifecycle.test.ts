@@ -95,7 +95,14 @@ for (const artifact of artifacts) {
       const video = document.querySelector('video');
       return video !== null && video.currentTime < 1.4;
     }));
-    await page.evaluate(() => history.pushState({}, '', '/examplechannel/video/654321'));
+    await page.evaluate(html => {
+      history.pushState({}, '', '/examplechannel/video/654321');
+      const player = document.querySelector('[data-a-target="video-player"]');
+      if (!player) throw new Error('Missing fixture player');
+      player.outerHTML = html;
+    }, playerHtml());
+    await ready(page);
+    await seek(page);
     await assertSkipped(page);
   }));
 }
