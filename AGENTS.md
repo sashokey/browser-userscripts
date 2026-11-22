@@ -18,13 +18,13 @@ npm run check:build
 
 After changing a script source, run `npm run build` to regenerate its distribution, then rerun `npm run check:build`.
 
-In the browser-test environment, run `npx playwright install chromium` and `npm run check` from each script directory. Use `npx playwright install --with-deps chromium` on Linux runners that need system libraries. Run YouTube's `npm run test:stock` and `npm run test:live` there as well. Set `SPONSORBLOCK_EXTENSION` to the directory containing the verified extension manifest. The YouTube workflow specifies the official archive and its checksum.
+In the browser-test environment, run `npx playwright install chromium` and `npm run check` from each script directory. Use `npx playwright install --with-deps chromium` on Linux runners that need system libraries. Run YouTube's `npm run test:stock` and `npm run test:live` there as well. Set `SPONSORBLOCK_EXTENSION` to the directory containing the verified extension manifest. The YouTube workflow specifies the official archive and its checksum. Run `npm run test:music` separately when the runner has guest access to YouTube Music search.
 
 ## CI
 
 - `.github/workflows/ozon-search.yml` checks syntax, lint, types, reproducibility, product filtering, cart and listing lifecycle, and sensitivity to rating and delivery regressions.
 - `.github/workflows/skip-twitch-muted-segments.yml` checks syntax, lint, types, reproducibility, seekbar and playback behavior, and sensitivity to paused playback and channel recording regressions.
-- `.github/workflows/youtube-tools.yml` checks types, lint, reproducibility, desktop and mobile behavior, and the YouTube Music playback guard. Its integration job also checks live YouTube Music search and desktop and mobile YouTube, including SponsorBlock. Report a stock guest-playback challenge recorded by the job as skipped coverage. Use the manual checks below for live YouTube Music playback.
+- `.github/workflows/youtube-tools.yml` checks types, lint, reproducibility, desktop and mobile behavior, and the YouTube Music playback guard. Its integration job checks live desktop and mobile YouTube, including SponsorBlock. Report a stock guest-playback challenge recorded by the job as skipped coverage. Use the manual checks below for live YouTube Music.
 
 Each workflow runs on pushes and pull requests and supports manual dispatch. Run its commands from the script directory and use that directory's lockfile for caching. Verify every workflow for the published commit SHA.
 
