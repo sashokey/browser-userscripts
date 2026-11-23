@@ -85,6 +85,12 @@ class Element extends EventTarget {
   getAttribute(name: string): string | null {
     return this.attributes.get(name) ?? null;
   }
+  hasAttribute(name: string): boolean {
+    return this.attributes.has(name);
+  }
+  contains(node: Element): boolean {
+    return this === node || this.children.some((child) => child.contains(node));
+  }
   toggleAttribute(): void {}
   matches(selector: string): boolean {
     return selector.split(",").some((part) => part.trim() === this.name);
@@ -210,11 +216,8 @@ function openMusic(mobile: boolean, saved: boolean | undefined) {
       name === nativeTag ? new NativeItem() : new Element(name),
     createElementNS: (_namespace: string, name: string) => new Element(name),
   });
-  const window = {
-    get top() {
-      return window;
-    },
-  };
+  const window = new EventTarget();
+  Object.defineProperty(window, "top", { value: window });
   const observers = new Map<object, (records: unknown[]) => void>();
   class Observer {
     readonly callback: (records: unknown[]) => void;
@@ -233,6 +236,8 @@ function openMusic(mobile: boolean, saved: boolean | undefined) {
   runInNewContext(code, {
     document,
     window,
+    unsafeWindow: window,
+    AbortController,
     Element,
     HTMLElement: Element,
     MutationObserver: Observer,

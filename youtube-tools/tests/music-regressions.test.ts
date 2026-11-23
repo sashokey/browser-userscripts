@@ -95,6 +95,7 @@ function application(items: ReturnType<typeof item>[], response?: object) {
     playerApi,
     root: {
       isConnected: true,
+      querySelector: () => null,
       querySelectorAll: (selector: string) =>
         selector.startsWith("ytmusic-two-row-item-renderer,") ? rendered : [],
       queue: {

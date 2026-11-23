@@ -1,5 +1,6 @@
 import { observeAppTree, read } from "./dom.ts";
 import { libraryItem, libraryMutation, musicLibrary } from "./music-library.ts";
+import { musicLyrics } from "./music-lyrics.ts";
 
 const audioTracks = new Set([
   "MUSIC_VIDEO_TYPE_ATV",
@@ -84,11 +85,11 @@ function object(value: unknown): value is object {
   return value !== null && typeof value === "object";
 }
 
-function invoke(owner: unknown, key: string): unknown {
+function invoke(owner: unknown, key: string, ...args: unknown[]): unknown {
   const method = read(owner, key);
   if (typeof method !== "function") return;
   try {
-    return Reflect.apply(method, owner, []);
+    return Reflect.apply(method, owner, args);
   } catch {}
 }
 
@@ -239,6 +240,12 @@ function skipDirection(
 
 export function music(): void {
   const syncLibrary = musicLibrary();
+  const syncLyrics = musicLyrics((video) => {
+    const player = video.closest("#movie_player");
+    const playing = id(read(invoke(player, "getVideoData"), "video_id"));
+    const route = watchId();
+    if (!route || !playing || route === playing) return route ?? playing;
+  }, () => id(invoke(read(unsafeWindow, "ytcfg"), "get", "INNERTUBE_CLIENT_VERSION")));
   let app: Element | null = null;
   let queue: object | undefined;
   let currentPlayer: object | undefined;
@@ -723,6 +730,7 @@ export function music(): void {
   const observer = new MutationObserver((records) => {
     if (!app?.isConnected) return;
     updateQueue();
+    syncLyrics(app);
     if (records.some(libraryMutation)) syncLibrary(app);
     const changed = new Set<Element>();
     let queueChanged = false;
@@ -757,6 +765,7 @@ export function music(): void {
     observer.disconnect();
     observeAppTree(lifecycle, app);
     updateQueue();
+    syncLyrics(app);
     if (!app) {
       syncLibrary(null);
       return;
