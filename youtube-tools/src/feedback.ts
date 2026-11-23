@@ -40,6 +40,7 @@ const loaderActive = "ytdVideoPreviewLoaderActive";
 const loaderContainer = ".ytdVideoPreviewLoaderVideoPreviewContainer";
 const previewContainer = `${previewTag},ytd-video-preview-loader,${loaderContainer}`;
 const previewControls = "ytm-mute-button,ytm-closed-captioning-button";
+const keyboardAttribute = "data-ytt-feedback-keyboard";
 const triggerSelector =
   '.ytLockupMetadataViewModelMenuButton button,ytd-menu-renderer button,ytm-menu button,#menu button,button[aria-label="Action menu"]';
 const legacyMenu = "div#menu.menu-container:has(>.menu-content[role=dialog])";
@@ -96,13 +97,14 @@ type Operation = {
 
 const styles = `
   .ytt-feedback-card{position:relative!important${mobile ? ";isolation:isolate" : ""}}
-  .ytt-feedback{position:absolute;z-index:8;display:flex;flex-direction:column;gap:4px;opacity:0;pointer-events:none}
+  .ytt-feedback{position:absolute;z-index:8;display:flex;flex-direction:column;gap:4px;opacity:0;visibility:hidden;pointer-events:none}
   .ytt-feedback[hidden]{display:none!important}
   .ytt-feedback-row{flex-direction:row}
-  .ytt-feedback-card:has(.ytt-feedback-thumbnail:hover):not(:has(${nativeActions}${hiddenActions}))>.ytt-feedback,.ytt-feedback-card:has(${nativeActions}:hover)>.ytt-feedback,.ytt-feedback-card:focus-within>.ytt-feedback,.ytt-feedback:hover,.ytt-feedback-preview{opacity:1;--ytt-feedback-hit:auto}
+  [${keyboardAttribute}] .ytt-feedback{visibility:visible}
+  .ytt-feedback-card:has(.ytt-feedback-thumbnail:hover):not(:has(${nativeActions}${hiddenActions}))>.ytt-feedback,.ytt-feedback-card:has(${nativeActions}:hover)>.ytt-feedback,.ytt-feedback-card:focus-within>.ytt-feedback,.ytt-feedback:hover,.ytt-feedback-preview{opacity:1;visibility:visible;--ytt-feedback-hit:auto}
   .ytt-feedback-card:has(>.ytt-feedback:hover,${nativeActions}:hover) ${nativeActions}${hiddenActions}{opacity:1;visibility:visible}
   .ytt-feedback-card:has(>.ytt-feedback:hover) ${legacyActions}:not([hidden]){opacity:1;visibility:visible}
-  ${mobile ? ".ytt-feedback{opacity:1;--ytt-feedback-hit:auto}" : "@media(hover:none),(pointer:coarse){.ytt-feedback{opacity:1;--ytt-feedback-hit:auto}}"}
+  ${mobile ? ".ytt-feedback{opacity:1;visibility:visible;--ytt-feedback-hit:auto}" : "@media(hover:none),(pointer:coarse){.ytt-feedback{opacity:1;visibility:visible;--ytt-feedback-hit:auto}}"}
   button.ytt-action{position:relative;box-sizing:border-box;display:grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:50%;color:var(--yt-spec-static-white,#fff);cursor:pointer;pointer-events:var(--ytt-feedback-hit,none)}
   button.ytt-action[hidden]{display:none!important}
   :where(button.ytt-action){background-color:rgba(0,0,0,.3)}
@@ -1562,7 +1564,10 @@ export function feedback(): void {
         "keydown",
         (event) => {
           if (!(event instanceof KeyboardEvent) || event.key !== "Tab") return;
-          keyboardNavigation = true;
+          if (!keyboardNavigation) {
+            keyboardNavigation = true;
+            root.setAttribute(keyboardAttribute, "");
+          }
           if (preview) syncPreview();
         },
         { capture: true, signal },
@@ -1572,6 +1577,7 @@ export function feedback(): void {
         () => {
           if (!keyboardNavigation) return;
           keyboardNavigation = false;
+          root.removeAttribute(keyboardAttribute);
           if (preview) syncPreview();
         },
         { passive: true, signal },
@@ -1609,6 +1615,7 @@ export function feedback(): void {
       "abort",
       () => {
         cancelOperation();
+        if (keyboardNavigation) root.removeAttribute(keyboardAttribute);
         scope = undefined;
         observer.disconnect();
         managers?.disconnect();
