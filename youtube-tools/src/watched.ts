@@ -1,4 +1,4 @@
-import { app, mobile, navigation } from "./dom.ts";
+import { app, mobile, navigation, previewOriginAttribute } from "./dom.ts";
 import { enabled, listen } from "./state.ts";
 
 const browse = mobile ? "ytm-browse" : "ytd-browse";
@@ -16,6 +16,7 @@ const progressCandidates = `${progress},[${progressAttribute}]`;
 const interacting = mobile
   ? ":focus-within,:active"
   : ":hover,:focus-within,:active";
+const previewOrigin = `[${previewOriginAttribute}]`;
 
 function scope(): string | undefined {
   const path = location.pathname;
@@ -47,7 +48,7 @@ function scan(node: Element): void {
 
 export function watched(): void {
   GM_addStyle(
-    `[data-ytt-filter]:not([hidden]) :is(${cards}):not(:is(${panels},${collections}) *,:has(${collections})):not(${interacting}):has(:is(${progress})[${progressAttribute}]){display:none!important}`,
+    `[data-ytt-filter]:not([hidden]) :is(${cards}):not(:is(${panels},${collections}) *,:has(${collections})):not(${previewOrigin},${previewOrigin} *,:has(${previewOrigin}),${interacting}):has(:is(${progress})[${progressAttribute}]){display:none!important}`,
   );
   app((root, signal) => {
     const active = new Set<Element>();

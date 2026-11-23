@@ -116,10 +116,16 @@ function installNativeMenu({
       ...rowData(card.id, key, modelCommand),
       ...(modelIcon && {
         title: { content: label },
-        leadingImage: { sources: [{ clientResource: { imageName: modelIcon } }] },
+        leadingImage: {
+          sources: [{ clientResource: { imageName: modelIcon } }],
+        },
       }),
     }));
-    if (linkToCard && trigger && (mobile || rows.some((row) => row.modelIcon))) {
+    if (
+      linkToCard &&
+      trigger &&
+      (mobile || rows.some((row) => row.modelIcon))
+    ) {
       const view = document.createElement("button-view-model");
       const listViewModel = {
         listItems: itemData.map((listItemViewModel) => ({ listItemViewModel })),
@@ -1447,6 +1453,44 @@ void test("a delayed native menu cannot select feedback on a recycled thumbnail 
     },
     { menu: { delayed: true } },
   ));
+
+void test("an owned native menu closes if its card is recycled while waiting for an entry", () =>
+  fixture(
+    async (page) => {
+      await quickAction(page, "alpha", interest);
+      const menu = page.locator('yt-sheet-view-model[data-owner="alpha"]');
+      await menu
+        .locator(":scope[data-ytt-feedback-menu]")
+        .waitFor({ state: "attached" });
+      const link = page.locator("#alpha").getByRole("link");
+      await link.evaluate((element) =>
+        element.setAttribute("href", "/watch?v=lmnopqrstuv"),
+      );
+      await menu.waitFor({ state: "detached" });
+      assert.equal(
+        await page.locator("#alpha").getAttribute("data-selection"),
+        null,
+      );
+    },
+    { menu: { rows: [{ key: "other", label: "Watch later" }] } },
+  ));
+
+void test("recycling a thumbnail clears the previous video's feedback notice", () =>
+  fixture(async (page) => {
+    await page.clock.install();
+    await page
+      .locator("#alpha .fixture-trigger")
+      .evaluate((trigger) => trigger.setAttribute("aria-disabled", "true"));
+    await quickAction(page, "alpha", interest);
+    const button = page.locator("#alpha .ytt-action").first();
+    assert.equal(await button.getAttribute("aria-label"), "Unavailable");
+    await page.locator("#alpha").evaluate((card) => {
+      card.querySelector(".fixture-trigger")?.removeAttribute("aria-disabled");
+      card.querySelector("a")?.setAttribute("href", "/watch?v=lmnopqrstuv");
+    });
+    assert.equal(await button.getAttribute("aria-label"), interest);
+    assert.equal(await button.getAttribute("data-unavailable"), null);
+  }));
 
 for (const locale of translations) {
   const overrides = nativeLabels[locale.language];

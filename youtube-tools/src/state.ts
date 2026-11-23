@@ -20,7 +20,7 @@ export function initializePreferences(): void {
     try {
       update(key, GM_getValue<unknown>(key, false));
       GM_addValueChangeListener<unknown>(key, (_key, _before, value) =>
-        update(key, value),
+        update(key, value === undefined ? false : value),
       );
     } catch {}
   }

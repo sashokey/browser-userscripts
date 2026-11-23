@@ -154,7 +154,9 @@ const nativeAliases: Record<
   "zh-cn": { channel: ["不要推荐此频道"] },
   "zh-tw": { channel: ["不推薦此頻道"] },
   "hi-in": { interest: ["कोई दिलचस्पी नहीं"], channel: ["यह चैनल न सुझाएं"] },
-  "es-419": { channel: ["No recomendar el canal"] },
+  "es-419": {
+    channel: ["No recomendar el canal", "No recomendarme este canal"],
+  },
   ar: { interest: ["لا يهمّني", "لا يهمني"] },
   "fr-fr": { channel: ["Ne pas recommander la chaîne"] },
   "bn-bd": { channel: ["চ্যানেল সাজেস্ট করবেন না", "এই চ্যানেলের সাজেশন চাই না"] },

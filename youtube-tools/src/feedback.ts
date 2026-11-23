@@ -1,4 +1,12 @@
-import { activation, app, mobile, navigation, svg, visible } from "./dom.ts";
+import {
+  activation,
+  app,
+  mobile,
+  navigation,
+  previewOriginAttribute,
+  svg,
+  visible,
+} from "./dom.ts";
 import { feedbackLabels, message } from "./language.ts";
 
 const cardSelector = mobile
@@ -62,6 +70,7 @@ const menuIcons: Record<Action, string> = {
 type Item = {
   element: Element;
   anchor: HTMLAnchorElement;
+  href: string;
   surface: Element;
   panel: HTMLDivElement;
   clippers: Set<Element>;
@@ -70,7 +79,7 @@ type Item = {
 };
 type Hovered = { item: Item; href: string; gesture: symbol };
 type Preview = Hovered & { target: HTMLElement };
-type Ownership = Pick<Hovered, "href" | "gesture"> & { ended: boolean };
+type Ownership = Hovered & { ended: boolean };
 type HorizontalBounds = {
   left: number;
   right: number;
@@ -87,19 +96,19 @@ type Operation = {
 
 const styles = `
   .ytt-feedback-card{position:relative!important${mobile ? ";isolation:isolate" : ""}}
-  .ytt-feedback{position:absolute;z-index:8;display:flex;flex-direction:column;gap:4px;opacity:0;visibility:hidden;pointer-events:none}
+  .ytt-feedback{position:absolute;z-index:8;display:flex;flex-direction:column;gap:4px;opacity:0;pointer-events:none}
   .ytt-feedback[hidden]{display:none!important}
   .ytt-feedback-row{flex-direction:row}
-  .ytt-feedback-card:has(.ytt-feedback-thumbnail:hover):not(:has(${nativeActions}${hiddenActions}))>.ytt-feedback,.ytt-feedback-card:has(${nativeActions}:hover)>.ytt-feedback,.ytt-feedback-card:focus-within>.ytt-feedback,.ytt-feedback:hover,.ytt-feedback-preview{opacity:1;visibility:visible}
+  .ytt-feedback-card:has(.ytt-feedback-thumbnail:hover):not(:has(${nativeActions}${hiddenActions}))>.ytt-feedback,.ytt-feedback-card:has(${nativeActions}:hover)>.ytt-feedback,.ytt-feedback-card:focus-within>.ytt-feedback,.ytt-feedback:hover,.ytt-feedback-preview{opacity:1;--ytt-feedback-hit:auto}
   .ytt-feedback-card:has(>.ytt-feedback:hover,${nativeActions}:hover) ${nativeActions}${hiddenActions}{opacity:1;visibility:visible}
   .ytt-feedback-card:has(>.ytt-feedback:hover) ${legacyActions}:not([hidden]){opacity:1;visibility:visible}
-  ${mobile ? ".ytt-feedback{opacity:1;visibility:visible}" : "@media(hover:none),(pointer:coarse){.ytt-feedback{opacity:1;visibility:visible}}"}
-  button.ytt-action{position:relative;box-sizing:border-box;display:grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:50%;color:var(--yt-spec-static-white,#fff);cursor:pointer;pointer-events:auto}
+  ${mobile ? ".ytt-feedback{opacity:1;--ytt-feedback-hit:auto}" : "@media(hover:none),(pointer:coarse){.ytt-feedback{opacity:1;--ytt-feedback-hit:auto}}"}
+  button.ytt-action{position:relative;box-sizing:border-box;display:grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:50%;color:var(--yt-spec-static-white,#fff);cursor:pointer;pointer-events:var(--ytt-feedback-hit,none)}
   button.ytt-action[hidden]{display:none!important}
   :where(button.ytt-action){background-color:rgba(0,0,0,.3)}
   :where(button.ytt-action:hover,button.ytt-action:active){background-color:rgba(40,40,40,.4)}
-  button.ytt-action:focus-visible{outline:2px solid var(--yt-spec-static-white,#fff);outline-offset:2px}
-  .ytt-action svg{width:24px;height:24px;fill:currentColor;pointer-events:none}
+  button.ytt-action:focus-visible{outline:2px solid var(--yt-spec-static-white,#fff);outline-offset:2px;box-shadow:0 0 0 2px #171717}
+  .ytt-action svg{width:24px;height:24px;fill:currentColor;stroke:#171717;stroke-width:1.5px;stroke-linejoin:round;paint-order:stroke fill;pointer-events:none}
   .ytt-action[data-unavailable]::after{content:attr(title);position:absolute;inset-inline-end:calc(100% + 6px);padding:4px 8px;border-radius:4px;background:var(--yt-spec-tooltip-background,#212121);color:#fff;font:400 12px Roboto,Arial,sans-serif;white-space:nowrap}
   [data-ytt-feedback-menu]{opacity:0!important;pointer-events:none!important}
 `;
@@ -594,10 +603,16 @@ function measure(
 }
 
 function positionPanel(
-  panel: HTMLDivElement,
+  { panel, anchor }: Item,
   position: ReturnType<typeof measure>,
 ): void {
   const hidden = !position;
+  if (
+    hidden &&
+    panel.contains(document.activeElement) &&
+    anchor.getClientRects().length
+  )
+    anchor.focus({ preventScroll: true });
   if (panel.hidden !== hidden) panel.hidden = hidden;
   if (!position) return;
   panel.classList.toggle("ytt-feedback-row", position.horizontal);
@@ -646,7 +661,13 @@ export function feedback(): void {
               const item = card && items.get(card);
               if (item?.surface !== target) continue;
               if (isIntersecting) visibleMobile.add(item);
-              else visibleMobile.delete(item);
+              else if (visibleMobile.delete(item)) {
+                item.panel.style.clipPath = "";
+                for (const button of item.panel.querySelectorAll<HTMLButtonElement>(
+                  "button[inert]",
+                ))
+                  button.inert = false;
+              }
             }
             scheduleMobileClip();
           })
@@ -690,6 +711,7 @@ export function feedback(): void {
     let hovered: Hovered | undefined;
     let preview: Preview | undefined;
     let host: Element | null = null;
+    let keyboardNavigation = false;
     const previewObserver = mobile
       ? undefined
       : new MutationObserver((records) => {
@@ -729,6 +751,14 @@ export function feedback(): void {
         if (
           !target.matches(loaderContainer) ||
           old.includes(loaderActive) === target.classList.contains(loaderActive)
+        )
+          return;
+      } else if (record.attributeName === "style") {
+        const hidden =
+          /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse))\s*(?:!\s*important\s*)?(?:;|$)/i;
+        if (
+          !hidden.test(record.oldValue ?? "") &&
+          !hidden.test(target.getAttribute("style") ?? "")
         )
           return;
       } else if (record.attributeName !== "hidden") {
@@ -888,7 +918,7 @@ export function feedback(): void {
           delete item.nativeSurface;
         }
       }
-      positionPanel(item.panel, position);
+      positionPanel(item, position);
     }
 
     function positionBatch(): void {
@@ -947,6 +977,7 @@ export function feedback(): void {
       thumbnails?.unobserve(target);
       movePanel(item.panel, item.element);
       item.panel.classList.remove("ytt-feedback-preview");
+      item.element.removeAttribute(previewOriginAttribute);
       schedulePosition(item);
     }
 
@@ -972,7 +1003,7 @@ export function feedback(): void {
       watchPreviewHost();
     }
 
-    function syncPreview(fromTab = false): void {
+    function syncPreview(): void {
       if (!hovered) return;
       const { item, href, gesture } = hovered;
       if (href !== item.anchor.href || !visible(item.anchor)) {
@@ -985,12 +1016,18 @@ export function feedback(): void {
         detachPreview();
         return;
       }
+      if (!visible(target)) {
+        endOwnership(target);
+        return;
+      }
       if (preview?.target !== target) {
         detachPreview();
         const owner = previewOwners.get(target);
         if (
           owner &&
-          (owner.ended ? owner.gesture === gesture : owner.href !== href)
+          (owner.ended
+            ? owner.gesture === gesture
+            : owner.item !== item || owner.href !== href)
         )
           return;
         const image = item.surface.getBoundingClientRect();
@@ -1000,15 +1037,17 @@ export function feedback(): void {
         if (x < box.left || x >= box.right || y < box.top || y >= box.bottom)
           return;
         preview = { item, target, href, gesture };
-        previewOwners.set(target, { href, gesture, ended: false });
+        item.element.setAttribute(previewOriginAttribute, "");
+        previewOwners.set(target, { item, href, gesture, ended: false });
         thumbnails?.observe(target);
       }
       syncActions(item);
       const focused = document.activeElement;
       const keepCardOrder =
+        keyboardNavigation ||
         item.element.contains(focused) ||
         (item.panel.contains(focused) &&
-          (fromTab || Boolean(focused?.matches(":focus-visible"))));
+          Boolean(focused?.matches(":focus-visible")));
       const destination = keepCardOrder ? item.element : target;
       if (
         item.panel.parentElement !== destination ||
@@ -1038,6 +1077,13 @@ export function feedback(): void {
       button.setAttribute("aria-label", text);
     }
 
+    function clearNotice(button: HTMLButtonElement, action: Action): void {
+      window.clearTimeout(notices.get(button));
+      notices.delete(button);
+      delete button.dataset.unavailable;
+      rename(button, message(action));
+    }
+
     function unavailable(button: HTMLButtonElement, action: Action): void {
       if (!button.isConnected) return;
       window.clearTimeout(notices.get(button));
@@ -1045,11 +1091,7 @@ export function feedback(): void {
       button.dataset.unavailable = "";
       notices.set(
         button,
-        window.setTimeout(() => {
-          rename(button, message(action));
-          delete button.dataset.unavailable;
-          notices.delete(button);
-        }, 1550),
+        window.setTimeout(() => clearNotice(button, action), 1550),
       );
     }
 
@@ -1155,11 +1197,13 @@ export function feedback(): void {
           selectedEntry,
         );
         menu = popup;
-        const canSelect =
-          !controller.signal.aborted &&
-          sameRoute(current.route, popup) &&
-          validTarget(current);
-        if (!canSelect) return;
+        const samePage = sameRoute(current.route, popup);
+        const stillValid = validTarget(current);
+        if (!samePage || !stillValid || signal.aborted) {
+          if (popup && samePage && !stillValid && ownedMenus().includes(popup))
+            close(popup);
+          return;
+        }
         refreshActions(item);
         const owned = popup ? ownedMenus() : [];
         if (popup && (owned.length !== 1 || owned[0] !== popup)) return;
@@ -1275,6 +1319,14 @@ export function feedback(): void {
           surface === old.surface &&
           ownsPanel(old)
         ) {
+          if (old.href !== anchor.href) {
+            old.href = anchor.href;
+            for (const [index, action] of actions.entries()) {
+              const button = old.panel.children.item(index);
+              if (button instanceof HTMLButtonElement && notices.has(button))
+                clearNotice(button, action);
+            }
+          }
           refreshActions(old);
           return;
         }
@@ -1286,6 +1338,7 @@ export function feedback(): void {
       const item: Item = {
         element,
         anchor,
+        href: anchor.href,
         surface,
         panel,
         clippers: new Set(),
@@ -1504,19 +1557,26 @@ export function feedback(): void {
       },
       { signal },
     );
-    if (!mobile)
+    if (!mobile) {
       root.addEventListener(
         "keydown",
         (event) => {
-          if (
-            event instanceof KeyboardEvent &&
-            event.key === "Tab" &&
-            preview?.item.panel.contains(document.activeElement)
-          )
-            syncPreview(true);
+          if (!(event instanceof KeyboardEvent) || event.key !== "Tab") return;
+          keyboardNavigation = true;
+          if (preview) syncPreview();
         },
         { capture: true, signal },
       );
+      root.addEventListener(
+        "pointermove",
+        () => {
+          if (!keyboardNavigation) return;
+          keyboardNavigation = false;
+          if (preview) syncPreview();
+        },
+        { passive: true, signal },
+      );
+    }
     root.addEventListener(
       "pointerover",
       (event) => {

@@ -739,55 +739,64 @@ void test("a native inline preview rerender restores one feedback panel and meas
     );
   }));
 
-void test("an active inline preview cannot pick up feedback for a different intersecting card", () =>
-  previewFixture(async (page) => {
-    await enterPreviewWithPointer(page);
-    const nextImage = await page
-      .locator("#next-video yt-thumbnail-view-model")
-      .boundingBox();
-    assert.ok(nextImage);
-    const loader = page.locator("ytd-video-preview-loader");
-    await loader.evaluate((element, box) => {
-      if (!(element instanceof HTMLElement)) throw new Error("Missing preview");
-      element.style.height = `${box.y + box.height * 0.75 - element.getBoundingClientRect().top}px`;
-    }, nextImage);
-    const x = nextImage.x + nextImage.width / 2;
-    const y = nextImage.y + nextImage.height;
-    await page.mouse.move(x, y - 4);
-    assert.equal(
-      await page.evaluate(
-        ({ x, y }) =>
-          document.elementFromPoint(x, y)?.closest("#next-video")?.id,
-        { x, y: y - 4 },
-      ),
-      "next-video",
-    );
-    await page.mouse.move(x, y - nextImage.height / 2);
-    const wrongRequests = await page.evaluate(() => {
-      const trigger = document.querySelector<HTMLButtonElement>(
-        "#next-video .ytLockupMetadataViewModelMenuButton button",
+for (const sameVideo of [false, true])
+  void test(`an active inline preview cannot pick up feedback for an intersecting card with ${sameVideo ? "the same" : "a different"} video URL`, () =>
+    previewFixture(async (page) => {
+      if (sameVideo)
+        await page.locator("#next-video a").evaluate((link) => {
+          const href = document.querySelector("#video a")?.getAttribute("href");
+          if (!href) throw new Error("Missing first card URL");
+          link.setAttribute("href", href);
+        });
+      await enterPreviewWithPointer(page);
+      const nextImage = await page
+        .locator("#next-video yt-thumbnail-view-model")
+        .boundingBox();
+      assert.ok(nextImage);
+      const loader = page.locator("ytd-video-preview-loader");
+      await loader.evaluate((element, box) => {
+        if (!(element instanceof HTMLElement))
+          throw new Error("Missing preview");
+        element.style.height = `${box.y + box.height * 0.75 - element.getBoundingClientRect().top}px`;
+      }, nextImage);
+      const x = nextImage.x + nextImage.width / 2;
+      const y = nextImage.y + nextImage.height;
+      await page.mouse.move(x, y - 4);
+      assert.equal(
+        await page.evaluate(
+          ({ x, y }) =>
+            document.elementFromPoint(x, y)?.closest("#next-video")?.id,
+          { x, y: y - 4 },
+        ),
+        "next-video",
       );
-      if (!trigger) throw new Error("Missing second card menu");
-      let requests = 0;
-      trigger.addEventListener("click", () => requests++);
-      document
-        .querySelector<HTMLButtonElement>("ytd-video-preview .ytt-action")
-        ?.click();
-      return requests;
-    });
-    assert.equal(wrongRequests, 0);
+      await page.mouse.move(x, y - nextImage.height / 2);
+      const wrongRequests = await page.evaluate(() => {
+        const trigger = document.querySelector<HTMLButtonElement>(
+          "#next-video .ytLockupMetadataViewModelMenuButton button",
+        );
+        if (!trigger) throw new Error("Missing second card menu");
+        let requests = 0;
+        trigger.addEventListener("click", () => requests++);
+        document
+          .querySelector<HTMLButtonElement>("ytd-video-preview .ytt-action")
+          ?.click();
+        return requests;
+      });
+      assert.equal(wrongRequests, 0);
 
-    await loader.evaluate((element, box) => {
-      if (!(element instanceof HTMLElement)) throw new Error("Missing preview");
-      const preview = element.querySelector("ytd-video-preview");
-      if (!preview) throw new Error("Missing native preview");
-      preview.classList.remove("ytdVideoPreviewActive");
-      element.style.top = `${box.y}px`;
-      element.style.height = `${box.height}px`;
-      preview.classList.add("ytdVideoPreviewActive");
-    }, nextImage);
-    await loader.locator(".ytt-action").first().waitFor();
-  }));
+      await loader.evaluate((element, box) => {
+        if (!(element instanceof HTMLElement))
+          throw new Error("Missing preview");
+        const preview = element.querySelector("ytd-video-preview");
+        if (!preview) throw new Error("Missing native preview");
+        preview.classList.remove("ytdVideoPreviewActive");
+        element.style.top = `${box.y}px`;
+        element.style.height = `${box.height}px`;
+        preview.classList.add("ytdVideoPreviewActive");
+      }, nextImage);
+      await loader.locator(".ytt-action").first().waitFor();
+    }));
 
 void test("same-route YouTube events leave feedback on the active inline preview", () =>
   previewFixture(async (page) => {
@@ -819,6 +828,46 @@ void test("Tab reaches both actions in card order while its inline preview is ac
     );
     await page.keyboard.press("Tab");
     assert.equal(await page.locator("#next-video a:focus").count(), 1);
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(
+      await page.locator(":focus").getAttribute("aria-label"),
+      "Don't recommend channel",
+    );
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(
+      await page.locator(":focus").getAttribute("aria-label"),
+      "Not interested",
+    );
+  }));
+
+void test("Shift+Tab reaches feedback when the pointer is outside both cards", () =>
+  fixture(card() + card("", "next-video", "lmnopqrstuv"), async (page) => {
+    await page.mouse.move(1, 1);
+    const panel = page.locator("#video .ytt-feedback");
+    const actions = panel.locator(".ytt-action");
+    await actions.last().waitFor({ state: "attached" });
+    await page.locator("#next-video a").focus();
+    assert.equal(
+      await panel.evaluate((element) => getComputedStyle(element).opacity),
+      "0",
+    );
+    assert.equal(
+      await actions
+        .last()
+        .evaluate((element) => getComputedStyle(element).pointerEvents),
+      "none",
+    );
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(
+      await actions
+        .last()
+        .evaluate((element) => element === document.activeElement),
+      true,
+    );
+    assert.equal(
+      await panel.evaluate((element) => getComputedStyle(element).opacity),
+      "1",
+    );
   }));
 
 void test("mobile horizontal scrolling reveals feedback on a thumbnail entering the viewport", () =>
@@ -981,6 +1030,50 @@ void test("hiding and revealing the preview node ends the earlier feedback owner
     await player.locator(".ytt-feedback").waitFor({ state: "detached" });
   }));
 
+void test("inline style hiding ends the previous preview ownership", () =>
+  previewFixture(async (page) => {
+    await enterPreviewWithPointer(page);
+    const player = page.locator("ytd-video-preview");
+    await player.evaluate((element) => {
+      if (!(element instanceof HTMLElement)) throw new Error("Missing preview");
+      const previous = element.style.display;
+      element.style.display = "none";
+      element.style.display = previous;
+    });
+    await player.locator(".ytt-feedback").waitFor({ state: "detached" });
+  }));
+
+void test("watched progress waits for the active portalled preview to close", () =>
+  previewFixture(async (page) => {
+    await page.locator("#video").evaluate((card) => {
+      const feed = document.createElement("ytd-browse");
+      feed.setAttribute("page-subtype", "home");
+      feed.style.display = "block";
+      card.before(feed);
+      feed.append(card);
+    });
+    await showPreview(page);
+    const action = page.locator("ytd-video-preview .ytt-action").first();
+    await action.hover();
+    await page.locator("#video yt-thumbnail-view-model").evaluate((image) => {
+      const progress = document.createElement("span");
+      progress.className =
+        "ytThumbnailOverlayProgressBarHostWatchedProgressBarSegment";
+      progress.style.width = "23%";
+      image.append(progress);
+    });
+    await page
+      .locator("#video [data-ytt-progress]")
+      .waitFor({ state: "attached" });
+    assert.ok(await page.locator("#video").isVisible());
+    assert.ok(await action.isVisible());
+    await page
+      .locator("ytd-video-preview-loader")
+      .evaluate((element) => element.setAttribute("hidden", ""));
+    await page.mouse.move(1, 1);
+    await page.locator("#video").waitFor({ state: "hidden" });
+  }));
+
 void test("the keyboard action panel remains inside its shelf when the preview overflows it", () =>
   previewFixture(async (page) => {
     await page.locator("#video").evaluate((element) => {
@@ -1034,6 +1127,28 @@ void test("CSS-only shelf width changes keep the existing thumbnail controls in 
           button.right <= clip.right
         );
       });
+    },
+    {
+      host: mobile,
+      options: { viewport: { width: 412, height: 820 } },
+      css: "#shelf {overflow-x:auto;width:380px} #track {width:1000px} #video {margin-inline-start:280px}",
+    },
+  ));
+
+void test("narrowing a shelf returns focus from hidden feedback to its thumbnail", () =>
+  fixture(
+    `<div id="shelf"><div id="track">${card()}</div></div>`,
+    async (page) => {
+      const action = page.locator(".ytt-action").first();
+      await action.waitFor();
+      await action.focus();
+      await page.locator("#shelf").evaluate((shelf) => {
+        if (shelf instanceof HTMLElement) shelf.style.width = "310px";
+      });
+      await action.waitFor({ state: "hidden" });
+      await page.waitForFunction(() =>
+        document.activeElement?.matches(".ytt-feedback-thumbnail"),
+      );
     },
     {
       host: mobile,
@@ -1137,6 +1252,42 @@ void test("an opaque mobile top bar without a pointer target never exposes a hid
       host: mobile,
       options: { viewport: { width: 768, height: 820 } },
       css: "ytm-mobile-topbar-renderer {position:fixed;inset:0 0 auto;height:48px;background:#111;pointer-events:none;z-index:4}",
+      outsideFeed: "<ytm-mobile-topbar-renderer></ytm-mobile-topbar-renderer>",
+    },
+  ));
+
+void test("a mobile thumbnail leaving the viewport releases its feedback controls", () =>
+  fixture(
+    card(),
+    async (page) => {
+      const action = page.locator(".ytt-action").first();
+      await action.waitFor();
+      await page.waitForFunction(() =>
+        Boolean(document.querySelector("button.ytt-action[inert]")),
+      );
+      assert.ok(
+        await action.evaluate(
+          (button) => button instanceof HTMLElement && button.inert,
+        ),
+      );
+      await page.locator("#video").evaluate((card) => {
+        if (card instanceof HTMLElement)
+          card.style.transform = "translateY(-1000px)";
+      });
+      await page.waitForFunction(() => {
+        const panel = document.querySelector<HTMLElement>(
+          "#video .ytt-feedback",
+        );
+        const button = panel?.querySelector("button");
+        return Boolean(
+          panel && button && !button.inert && !panel.style.clipPath,
+        );
+      });
+    },
+    {
+      host: mobile,
+      options: { viewport: { width: 412, height: 820 } },
+      css: "ytm-mobile-topbar-renderer {position:fixed;inset:0 0 auto;z-index:20;height:260px;background:white}",
       outsideFeed: "<ytm-mobile-topbar-renderer></ytm-mobile-topbar-renderer>",
     },
   ));

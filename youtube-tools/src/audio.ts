@@ -2,6 +2,7 @@ import { enabled } from "./state.ts";
 
 const objectConstructorSource = Function.prototype.toString.call(Object);
 const maxAudioPreloads = 256;
+const accessorValue = Symbol();
 
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -9,6 +10,21 @@ function record(value: unknown): value is Record<string, unknown> {
 
 function object(value: unknown): value is object {
   return !!value && (typeof value === "object" || typeof value === "function");
+}
+
+function dataValue(source: object, key: string): unknown {
+  for (
+    let owner: object | null = source;
+    owner;
+    owner = Reflect.getPrototypeOf(owner)
+  ) {
+    const descriptor = Object.getOwnPropertyDescriptor(owner, key);
+    if (descriptor) {
+      if (!("value" in descriptor)) return accessorValue;
+      const value: unknown = descriptor.value;
+      return value;
+    }
+  }
 }
 
 function withProperty(
@@ -44,6 +60,12 @@ function withProperty(
 }
 
 type Callable = (this: unknown, ...args: unknown[]) => unknown;
+type Preloads = {
+  injected: Set<string>;
+  native: Set<string>;
+  injectedOverflow: boolean;
+  nativeOverflow: boolean;
+};
 
 function callable(value: unknown): value is Callable {
   return typeof value === "function";
@@ -52,7 +74,34 @@ function callable(value: unknown): value is Callable {
 export function audio(): void {
   const patches = new WeakMap<object, Map<string, () => unknown>>();
   const wrappers = new WeakSet<object>();
-  const audioPreloads = new WeakMap<object, Set<string> | true>();
+  const audioPreloads = new WeakMap<object, Preloads>();
+
+  function rememberPreload(
+    owner: object,
+    id: string | undefined,
+    native: boolean,
+  ): void {
+    let preloads = audioPreloads.get(owner);
+    if (!preloads) {
+      preloads = {
+        injected: new Set(),
+        native: new Set(),
+        injectedOverflow: false,
+        nativeOverflow: false,
+      };
+      audioPreloads.set(owner, preloads);
+    }
+    if (id === undefined) {
+      preloads.nativeOverflow = true;
+    } else if (native) {
+      preloads.injected.delete(id);
+      if (preloads.native.size < maxAudioPreloads) preloads.native.add(id);
+      else if (!preloads.native.has(id)) preloads.nativeOverflow = true;
+    } else if (!preloads.native.has(id) && !preloads.nativeOverflow) {
+      if (preloads.injected.size < maxAudioPreloads) preloads.injected.add(id);
+      else if (!preloads.injected.has(id)) preloads.injectedOverflow = true;
+    }
+  }
 
   function intercept(
     owner: unknown,
@@ -84,8 +133,22 @@ export function audio(): void {
         }
         if (!inherited?.writable) return;
       }
-      let value: unknown = transform(Reflect.get(owner, key));
-      const get = () => value;
+      let followsPrototype = inherited !== undefined;
+      let original: unknown = Reflect.get(owner, key);
+      let value: unknown = transform(original);
+      const get = function (this: unknown): unknown {
+        if (followsPrototype) {
+          const prototype = Reflect.getPrototypeOf(owner);
+          const implementation: unknown = prototype
+            ? Reflect.get(prototype, key, this)
+            : undefined;
+          if (!Object.is(implementation, original)) {
+            value = transform(implementation);
+            original = implementation;
+          }
+        }
+        return value;
+      };
       Object.defineProperty(owner, key, {
         configurable: true,
         enumerable: descriptor?.enumerable ?? inherited?.enumerable ?? true,
@@ -93,6 +156,7 @@ export function audio(): void {
         set(this: object, next: unknown) {
           if (this === owner) {
             value = transform(next);
+            followsPrototype = false;
             return;
           }
           const own = Object.getOwnPropertyDescriptor(this, key);
@@ -138,30 +202,37 @@ export function audio(): void {
         wrap(original, (target, receiver, args) => {
           const owner = object(receiver) ? receiver : undefined;
           const preloads = owner && audioPreloads.get(owner);
-          const saturated = preloads === true;
-          const tracked = saturated ? undefined : preloads;
           const preload = method === "preloadVideoByPlayerVars";
           const current = enabled("audioOnly");
-          const rememberPreload = preload && current;
           let videoId: string | undefined;
+          let opaqueId = false;
           let parameters = args;
-          if (current || preloads) {
+          let preserveNative = false;
+          if (current || preloads || preload) {
             try {
               const params = args[0];
               if (record(params)) {
-                if (
-                  !saturated &&
-                  (rememberPreload || (!preload && tracked?.size))
-                ) {
-                  const nativeId = params["video_id"];
+                const mode = dataValue(params, "audio_only");
+                preserveNative = mode === true || mode === accessorValue;
+                if (preload || preloads) {
+                  const nativeId = dataValue(params, "video_id");
                   const id =
-                    typeof nativeId === "string" ? nativeId : params["videoId"];
+                    typeof nativeId === "string" || nativeId === accessorValue
+                      ? nativeId
+                      : dataValue(params, "videoId");
                   if (typeof id === "string") videoId = id;
+                  opaqueId = id === accessorValue;
                 }
                 if (
-                  current ||
-                  (saturated && !Reflect.has(params, "audio_only")) ||
-                  (videoId && tracked?.has(videoId))
+                  current
+                    ? !preserveNative
+                    : !preload &&
+                      videoId &&
+                      preloads &&
+                      (mode === undefined || mode === null) &&
+                      !preloads.native.has(videoId) &&
+                      (preloads.injected.has(videoId) ||
+                        (preloads.injectedOverflow && !preloads.nativeOverflow))
                 ) {
                   const updated = withProperty(params, "audio_only", current);
                   if (updated) parameters = [updated, ...args.slice(1)];
@@ -170,28 +241,13 @@ export function audio(): void {
             } catch {}
           }
           const result: unknown = Reflect.apply(target, receiver, parameters);
-          if (!owner || !videoId) return result;
-          const currentPreloads = audioPreloads.get(owner);
-          if (currentPreloads === true) return result;
-          if (rememberPreload && parameters !== args) {
-            if (!currentPreloads) {
-              audioPreloads.set(owner, new Set([videoId]));
-            } else if (
-              currentPreloads.size < maxAudioPreloads ||
-              currentPreloads.has(videoId)
-            ) {
-              currentPreloads.add(videoId);
-            } else {
-              audioPreloads.set(owner, true);
-            }
-          } else if (
-            !current &&
-            method === "loadVideoByPlayerVars" &&
-            parameters !== args
-          ) {
-            if (currentPreloads?.delete(videoId) && !currentPreloads.size)
-              audioPreloads.delete(owner);
-          }
+          if (
+            owner &&
+            preload &&
+            (videoId !== undefined || opaqueId) &&
+            (preserveNative || parameters !== args)
+          )
+            rememberPreload(owner, videoId, preserveNative);
           return result;
         }),
       );

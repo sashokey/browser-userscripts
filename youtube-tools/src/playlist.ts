@@ -23,6 +23,34 @@ function read(owner: object, key: string): unknown {
   return attempt<unknown>(() => Reflect.get(owner, key));
 }
 
+function inheritedProperty(
+  owner: object,
+  key: string,
+): PropertyDescriptor | undefined {
+  return attempt(() => {
+    for (
+      let prototype = Reflect.getPrototypeOf(owner);
+      prototype;
+      prototype = Reflect.getPrototypeOf(prototype)
+    ) {
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
+      if (descriptor) return descriptor;
+    }
+  });
+}
+
+function writeOwn(receiver: object, key: string, value: unknown): void {
+  const own = Object.getOwnPropertyDescriptor(receiver, key);
+  if (!own)
+    Reflect.defineProperty(receiver, key, {
+      value,
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+  else if (own.writable) Reflect.defineProperty(receiver, key, { value });
+}
+
 function seekingAudioEnd(media: HTMLVideoElement): boolean {
   const remaining = media.duration - media.currentTime;
   return (
@@ -84,7 +112,11 @@ function recoverTerminalAudioSeek(): void {
         attempt(() => {
           if (Reflect.apply(state, player, []) !== 0) return;
           attempted.set(media, url);
-          Reflect.apply(seek, player, [time - 1, true]);
+          try {
+            Reflect.apply(seek, player, [time - 1, true]);
+          } catch {
+            attempted.delete(media);
+          }
         });
       }, 250);
     },
@@ -97,16 +129,28 @@ function preventAdvance(owner: unknown): Suppression | undefined {
   const initial = read(owner, flag);
   if (typeof initial !== "boolean") return;
   const original = attempt(() => Object.getOwnPropertyDescriptor(owner, flag));
-  if (original?.configurable && original.writable) {
+  const inherited = original ? undefined : inheritedProperty(owner, flag);
+  if ((original?.configurable && original.writable) || inherited?.writable) {
     let value: unknown = initial;
-    const get = () => (playlistWatch() ? false : value);
+    let written = false;
+    const get = function (this: unknown): unknown {
+      if (playlistWatch()) return false;
+      if (original || written) return value;
+      const prototype = Reflect.getPrototypeOf(owner);
+      return prototype ? Reflect.get(prototype, flag, this) : undefined;
+    };
     const installed = attempt(() =>
       Reflect.defineProperty(owner, flag, {
         configurable: true,
-        enumerable: original.enumerable ?? false,
+        enumerable: original?.enumerable ?? false,
         get,
-        set(next: unknown) {
-          value = next;
+        set(this: object, next: unknown) {
+          if (this === owner) {
+            value = next;
+            written = true;
+            return;
+          }
+          writeOwn(this, flag, next);
         },
       }),
     );
@@ -117,30 +161,76 @@ function preventAdvance(owner: unknown): Suppression | undefined {
       return {
         maintain,
         restore() {
-          if (maintain())
+          if (!maintain()) return;
+          if (original)
             Reflect.defineProperty(owner, flag, { ...original, value });
+          else if (written)
+            Reflect.defineProperty(owner, flag, {
+              value,
+              configurable: true,
+              enumerable: true,
+              writable: true,
+            });
+          else Reflect.deleteProperty(owner, flag);
         },
       };
     }
   }
 
   let suppressed = false;
+  let writing = false;
+  let observedSetter: ((this: unknown, next: unknown) => void) | undefined;
+  function ownsSetter(): boolean {
+    return (
+      !observedSetter ||
+      attempt(() => Object.getOwnPropertyDescriptor(owner, flag))?.set ===
+        observedSetter
+    );
+  }
   const maintain = (): boolean => {
+    if (!ownsSetter()) return false;
     const value = read(owner, flag);
     if (value === false) return true;
-    if (
-      value !== true ||
-      attempt(() => Reflect.set(owner, flag, false)) !== true ||
-      read(owner, flag) !== false
-    )
-      return false;
+    if (value !== true) return false;
+    writing = true;
+    const written = attempt(() => Reflect.set(owner, flag, false));
+    writing = false;
+    if (written !== true) return false;
     suppressed = true;
-    return true;
+    return read(owner, flag) !== true;
   };
   if (!maintain()) return;
+  const accessor = original
+    ? original.configurable
+      ? original
+      : undefined
+    : inherited;
+  const setter: unknown = accessor ? Reflect.get(accessor, "set") : undefined;
+  if (accessor && typeof setter === "function") {
+    const update = function (this: unknown, next: unknown): void {
+      Reflect.apply(setter, this, [next]);
+      if (this === owner && !writing && next === false) suppressed = false;
+    };
+    if (
+      attempt(() =>
+        Reflect.defineProperty(owner, flag, {
+          ...accessor,
+          configurable: true,
+          enumerable: original?.enumerable ?? false,
+          set: update,
+        }),
+      )
+    )
+      observedSetter = update;
+  }
   return {
     maintain,
     restore() {
+      if (!ownsSetter()) return;
+      if (observedSetter) {
+        if (original) Reflect.defineProperty(owner, flag, original);
+        else Reflect.deleteProperty(owner, flag);
+      }
       if (!suppressed || read(owner, flag) !== false) return;
       if (
         !original &&
@@ -155,7 +245,8 @@ function preventAdvance(owner: unknown): Suppression | undefined {
 function preventNativeAdvance(manager: Element): Suppression | undefined {
   const native = read(manager, "TEST_ONLY");
   if (!native || typeof native !== "object") return;
-  const setter = read(native, "setCanAutoAdvance");
+  const method = "setCanAutoAdvance";
+  const setter = read(native, method);
   if (typeof setter !== "function") return;
   const getter = read(native, "getCanAutoAdvance");
   const readNativeState =
@@ -163,9 +254,21 @@ function preventNativeAdvance(manager: Element): Suppression | undefined {
       ? () => attempt<unknown>(() => Reflect.apply(getter, native, []))
       : undefined;
   const readManagerState = () => read(manager, flag);
+  let raw: unknown = setter;
+  let exposed: unknown = setter;
+  let observed = false;
+  let assigned = false;
+  const get = () => exposed;
+  const ownsMethod = (): boolean =>
+    observed
+      ? attempt(() => Object.getOwnPropertyDescriptor(native, method))?.get ===
+          get
+      : read(native, method) === setter;
   const write = (value: boolean) =>
     attempt(() => {
-      Reflect.apply(setter, native, [value]);
+      const writer = observed && ownsMethod() ? raw : read(native, method);
+      if (typeof writer !== "function") return false;
+      Reflect.apply(writer, native, [value]);
       return true;
     }) === true;
   let applied = false;
@@ -180,23 +283,67 @@ function preventNativeAdvance(manager: Element): Suppression | undefined {
     const previous =
       typeof nativeState === "boolean" ? nativeState : readManagerState();
     if (applied && previous === false) return true;
-    if (typeof previous !== "boolean" || !write(false) || readState() !== false)
-      return false;
+    if (typeof previous !== "boolean" || !write(false)) return false;
     if (previous) readSuppressedState = readState;
     applied = true;
-    return true;
+    return readState() !== true;
   }
 
   if (!suppress()) return;
+  const original = attempt(() =>
+    Object.getOwnPropertyDescriptor(native, method),
+  );
+  if (
+    original
+      ? original.configurable && original.writable
+      : inheritedProperty(native, method)?.writable
+  ) {
+    function wrap(candidate: unknown): unknown {
+      if (typeof candidate !== "function") return candidate;
+      return new Proxy(candidate, {
+        apply(target, receiver: unknown, args: unknown[]) {
+          const result: unknown = Reflect.apply(target, receiver, args);
+          if (receiver === native && args[0] === false)
+            readSuppressedState = undefined;
+          return result;
+        },
+      });
+    }
+    exposed = wrap(setter);
+    observed =
+      attempt(() =>
+        Reflect.defineProperty(native, method, {
+          configurable: true,
+          enumerable: original?.enumerable ?? false,
+          get,
+          set(this: object, next: unknown) {
+            if (this !== native) {
+              writeOwn(this, method, next);
+              return;
+            }
+            if (next === exposed) return;
+            assigned = true;
+            raw = next;
+            exposed = wrap(next);
+          },
+        }),
+      ) === true;
+  }
   return {
     maintain() {
       return (
-        read(manager, "TEST_ONLY") === native &&
-        read(native, "setCanAutoAdvance") === setter &&
-        suppress()
+        read(manager, "TEST_ONLY") === native && ownsMethod() && suppress()
       );
     },
     restore() {
+      if (observed && ownsMethod()) {
+        if (original)
+          Reflect.defineProperty(native, method, { ...original, value: raw });
+        else {
+          Reflect.deleteProperty(native, method);
+          if (assigned) writeOwn(native, method, raw);
+        }
+      }
       if (readSuppressedState?.() === false) write(true);
     },
   };
@@ -265,13 +412,6 @@ function desktop(root: Element, signal: AbortSignal): void {
   }
 
   navigation(check, signal);
-  window.addEventListener(
-    "yt-navigate-finish",
-    (event) => {
-      if (event.eventPhase === Event.AT_TARGET) check();
-    },
-    { signal },
-  );
   document.addEventListener("ended", check, { capture: true, signal });
   signal.addEventListener(
     "abort",

@@ -172,6 +172,35 @@ void test("desktop leaves write-only TEST_ONLY autoplay state intact", () => {
   assert.equal(native.shouldAdvance, true);
 });
 
+void test("a derived controller keeps its own queued autoplay value", () => {
+  const parent = { canAutoAdvance_: true };
+  const page = start("www.youtube.com", playlist, {
+    polymerController: parent,
+  });
+  const receiver: unknown = Object.create(parent);
+  assert.ok(receiver && typeof receiver === "object");
+  Reflect.set(receiver, "canAutoAdvance_", false);
+  page.navigate(ordinary);
+  assert.equal(parent.canAutoAdvance_, true);
+  assert.equal(Object.hasOwn(receiver, "canAutoAdvance_"), true);
+  assert.equal(Reflect.get(receiver, "canAutoAdvance_"), false);
+});
+
+void test("a failed terminal audio seek can be tried again after native recovery", () => {
+  const page = start("www.youtube.com", playlist);
+  const media = new NativeVideo();
+  const seek = media.player.seekTo;
+  media.player.seekTo = () => {
+    throw new Error("native seek not ready");
+  };
+  page.seeking(media);
+  page.flushTimeouts();
+  media.player.seekTo = seek;
+  page.seeking(media);
+  page.flushTimeouts();
+  assert.deepEqual(media.seeks, [[1826.661, true]]);
+});
+
 void test("desktop releases the old controller and suppresses the replacement app", () => {
   const first = { canAutoAdvance_: true };
   const second = { canAutoAdvance_: true };
@@ -191,6 +220,67 @@ void test("desktop restores TEST_ONLY autoplay state through its own getter", ()
 
   page.navigate(ordinary);
   assert.equal(native.shouldAdvance, true);
+});
+
+void test("desktop restores autoplay after YouTube replaces its native setter", () => {
+  let state = true;
+  const native = {
+    getCanAutoAdvance() {
+      return state;
+    },
+    setCanAutoAdvance(value: boolean) {
+      state = value;
+    },
+  };
+  const page = start("www.youtube.com", playlist, { TEST_ONLY: native });
+  assert.equal(state, false);
+  const replacement = (value: boolean) => {
+    state = value;
+  };
+  native.setCanAutoAdvance = replacement;
+  page.navigate(ordinary);
+  assert.equal(state, true);
+  assert.equal(Reflect.get(native, "setCanAutoAdvance"), replacement);
+});
+
+void test("desktop honors a native false written through the replacement autoplay setter", () => {
+  let state = true;
+  const native = {
+    getCanAutoAdvance() {
+      return state;
+    },
+    setCanAutoAdvance(value: boolean) {
+      state = value;
+    },
+  };
+  const page = start("www.youtube.com", playlist, { TEST_ONLY: native });
+  native.setCanAutoAdvance = (value: boolean) => {
+    state = value;
+  };
+  native.setCanAutoAdvance(false);
+  page.navigate(ordinary);
+  assert.equal(state, false);
+});
+
+void test("desktop honors a native false written through an inherited autoplay accessor", () => {
+  let state = true;
+  const prototype = {
+    get canAutoAdvance_() {
+      return state;
+    },
+    set canAutoAdvance_(value: boolean) {
+      state = value;
+    },
+  };
+  const controller: unknown = Object.create(prototype);
+  assert.ok(controller && typeof controller === "object");
+  const page = start("www.youtube.com", playlist, {
+    polymerController: controller,
+  });
+  Reflect.set(controller, "canAutoAdvance_", false);
+  page.navigate(ordinary);
+  assert.equal(state, false);
+  assert.equal(Object.hasOwn(controller, "canAutoAdvance_"), false);
 });
 
 for (const initial of [true, false]) {
@@ -232,6 +322,39 @@ void test("desktop blocks a replacement controller after window-only YouTube nav
   assert.equal(previous.canAutoAdvance_, true);
 });
 
+void test("desktop checks the playlist controller once for window-targeted navigation", () => {
+  const controller = { canAutoAdvance_: true };
+  let reads = 0;
+  const page = start("www.youtube.com", playlist, {
+    get polymerController() {
+      reads++;
+      return controller;
+    },
+  });
+  reads = 0;
+  const navigation = new Event("yt-navigate-finish");
+  Object.defineProperty(navigation, "eventPhase", { value: Event.AT_TARGET });
+  page.window.dispatchEvent(navigation);
+  assert.equal(reads, 1);
+});
+
+for (const changesState of [false, true]) {
+  void test(`desktop restores an inherited autoplay flag ${changesState ? "after a real native write" : "without creating a native write"}`, () => {
+    const parent = { canAutoAdvance_: true };
+    const controller: unknown = Object.create(parent);
+    assert.ok(controller && typeof controller === "object");
+    const page = start("www.youtube.com", playlist, {
+      polymerController: controller,
+    });
+    assert.equal(Reflect.get(controller, "canAutoAdvance_"), false);
+    if (changesState) Reflect.set(controller, "canAutoAdvance_", false);
+    page.navigate(ordinary);
+    assert.equal(Object.hasOwn(controller, "canAutoAdvance_"), changesState);
+    assert.equal(Reflect.get(controller, "canAutoAdvance_"), !changesState);
+    assert.equal(parent.canAutoAdvance_, true);
+  });
+}
+
 void test("desktop disables autoplay through a configurable controller accessor", () => {
   const controller = {
     nativeValue: true,
@@ -258,6 +381,80 @@ void test("desktop disables autoplay through a configurable controller accessor"
     original,
   );
 });
+
+for (const kind of ["controller accessor", "TEST_ONLY setter"] as const) {
+  void test(`${kind} preserves a native autoplay change during suppression`, () => {
+    let value = true;
+    const controller = {
+      get canAutoAdvance_() {
+        return value;
+      },
+      set canAutoAdvance_(next: boolean) {
+        value = next;
+      },
+    };
+    const api = {
+      getCanAutoAdvance() {
+        return value;
+      },
+      setCanAutoAdvance(next: boolean) {
+        value = next;
+      },
+    };
+    const page = start(
+      "www.youtube.com",
+      playlist,
+      kind === "controller accessor"
+        ? { polymerController: controller }
+        : { TEST_ONLY: api },
+    );
+    assert.equal(value, false);
+    if (kind === "controller accessor") controller.canAutoAdvance_ = false;
+    else api.setCanAutoAdvance(false);
+    page.navigate(ordinary);
+    assert.equal(value, false);
+  });
+
+  void test(`${kind} restores a successful suppression despite one failing read`, () => {
+    let value = true;
+    let unavailable = false;
+    function readValue(): boolean {
+      if (unavailable) {
+        unavailable = false;
+        throw new Error("native state not ready");
+      }
+      return value;
+    }
+    function writeValue(next: boolean): void {
+      value = next;
+      unavailable = !next;
+    }
+    const page = start(
+      "www.youtube.com",
+      playlist,
+      kind === "controller accessor"
+        ? {
+            polymerController: {
+              get canAutoAdvance_() {
+                return readValue();
+              },
+              set canAutoAdvance_(next: boolean) {
+                writeValue(next);
+              },
+            },
+          }
+        : {
+            TEST_ONLY: {
+              getCanAutoAdvance: readValue,
+              setCanAutoAdvance: writeValue,
+            },
+          },
+    );
+    assert.equal(value, false);
+    page.navigate(ordinary);
+    assert.equal(value, true);
+  });
+}
 
 void test("desktop disables autoplay on a writable non-configurable controller flag", () => {
   const controller = { canAutoAdvance_: true };

@@ -1,4 +1,12 @@
-import { activation, app, mobile, navigation, svg, visible } from "./dom.ts";
+import {
+  activation,
+  app,
+  mobile,
+  navigation,
+  read,
+  svg,
+  visible,
+} from "./dom.ts";
 import { message } from "./language.ts";
 import { enabled, flip, listen } from "./state.ts";
 import type { Setting } from "./state.ts";
@@ -50,18 +58,7 @@ function desktopAnchor(menus: readonly Element[]): Element | undefined {
     if (scope.closest('tp-yt-iron-dropdown[aria-hidden="true"]')) continue;
     const rows = [
       ...scope.querySelectorAll("ytd-compact-link-renderer"),
-    ].filter((row) => {
-      const data: unknown = Reflect.get(row, "data");
-      if (
-        !data ||
-        typeof data !== "object" ||
-        !("icon" in data) ||
-        !data.icon ||
-        typeof data.icon !== "object"
-      )
-        return false;
-      return "iconType" in data.icon && data.icon.iconType === "KEYBOARD";
-    });
+    ].filter((row) => read(row, "data", "icon", "iconType") === "KEYBOARD");
     const [anchor] = rows;
     if (rows.length === 1 && anchor) anchors.push(anchor);
   }
@@ -77,13 +74,9 @@ export function settings(): void {
   const controls = new Map<Setting, HTMLButtonElement>();
   let mounted: Element | null = null;
 
-  function mount(menus: readonly Element[] = []): void {
-    const scope =
-      mobile && location.pathname === "/select_site"
-        ? document.querySelector("ytm-settings")
-        : null;
+  function mount(menus: readonly Element[] = [], scope?: Element): void {
     const anchor = mobile ? undefined : desktopAnchor(menus);
-    if (!anchor && (!scope || !visible(scope))) {
+    if (!anchor && !scope) {
       if (mounted) {
         mounted.remove();
         mounted = null;
@@ -129,7 +122,14 @@ export function settings(): void {
     );
   if (mobile) {
     app((root, signal) => {
-      const observer = new MutationObserver(() => mount());
+      const render = () => {
+        const scope =
+          location.pathname === "/select_site"
+            ? [...root.querySelectorAll("ytm-settings")].find(visible)
+            : undefined;
+        mount([], scope);
+      };
+      const observer = new MutationObserver(render);
       let watching = false;
       function sync(): void {
         const active = location.pathname === "/select_site";
@@ -144,7 +144,7 @@ export function settings(): void {
             });
           else observer.disconnect();
         }
-        mount();
+        render();
       }
       navigation(sync, signal);
       signal.addEventListener(

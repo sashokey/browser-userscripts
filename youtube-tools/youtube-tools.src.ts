@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Tools
 // @namespace    https://github.com/sashokey/browser-userscripts
-// @version      1.0.14
-// @description  Quick feedback, watched-video filtering, audio-only playback, manual playlist navigation, and track filtering on YouTube Music.
+// @version      1.0.17
+// @description  Quick feedback, watched-video filtering, audio-only playback, manual playlist navigation, and track filtering and library shortcuts on YouTube Music.
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
 // @match        https://music.youtube.com/*

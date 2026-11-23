@@ -1,4 +1,5 @@
 export const mobile = location.hostname === "m.youtube.com";
+export const previewOriginAttribute = "data-ytt-preview-origin";
 const selector = mobile ? "ytm-app" : "ytd-app";
 type AppConsumer = (root: Element, signal: AbortSignal) => void;
 const consumers = new Set<AppConsumer>();
@@ -52,8 +53,16 @@ export function navigation(run: () => void, signal: AbortSignal): void {
     for (const event of ["state-navigateend", "updateui", "popstate"])
       window.addEventListener(event, run, { signal });
   } else {
-    for (const event of ["yt-navigate-finish", "yt-page-type-changed"])
-      document.addEventListener(event, run, { capture: true, signal });
+    for (const type of ["yt-navigate-finish", "yt-page-type-changed"]) {
+      document.addEventListener(type, run, { capture: true, signal });
+      window.addEventListener(
+        type,
+        (event) => {
+          if (event.target === window || event.target === unsafeWindow) run();
+        },
+        { signal },
+      );
+    }
     window.addEventListener("popstate", run, { signal });
   }
 }
@@ -63,6 +72,16 @@ export function visible(element: Element): boolean {
     element.getClientRects().length > 0 &&
     getComputedStyle(element).visibility !== "hidden"
   );
+}
+
+export function read(value: unknown, ...keys: string[]): unknown {
+  try {
+    for (const key of keys) {
+      if (value === null || typeof value !== "object") return;
+      value = Reflect.get(value, key);
+    }
+    return value;
+  } catch {}
 }
 
 export function svg(path: string): SVGSVGElement {

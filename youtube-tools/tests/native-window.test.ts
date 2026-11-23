@@ -82,3 +82,38 @@ void test("audio changes reach the page global when Violentmonkey wraps window",
   player.loadVideoByPlayerVars({ video_id: "IvQkb8aHPu8" });
   assert.deepEqual(observed, [true, true, false]);
 });
+
+void test("removing the Audio only preference restores ordinary player configuration", () => {
+  const window = {
+    get top() {
+      return window;
+    },
+    addEventListener() {},
+  };
+  const calls: (boolean | undefined)[] = [];
+  const application = {
+    create(_element: object, config: { args: { audio_only?: boolean } }) {
+      calls.push(config.args.audio_only);
+      return {};
+    },
+  };
+  let remove: (() => void) | undefined;
+  runInNewContext(code, {
+    window,
+    unsafeWindow: { yt: { player: { Application: application } } },
+    location: new URL("https://www.youtube.com/"),
+    document: { readyState: "loading", addEventListener() {} },
+    GM_getValue: (key: string) => key === "audioOnly",
+    GM_addValueChangeListener(
+      key: string,
+      listener: (key: string, before: unknown, after: unknown) => void,
+    ) {
+      if (key === "audioOnly") remove = () => listener(key, true, undefined);
+    },
+  });
+  application.create({}, { args: {} });
+  assert.ok(remove);
+  remove();
+  application.create({}, { args: {} });
+  assert.deepEqual(calls, [true, undefined]);
+});

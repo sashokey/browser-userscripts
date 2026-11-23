@@ -1,4 +1,5 @@
-import { observeAppTree } from "./dom.ts";
+import { observeAppTree, read } from "./dom.ts";
+import { libraryItem, libraryMutation, musicLibrary } from "./music-library.ts";
 
 const audioTracks = new Set([
   "MUSIC_VIDEO_TYPE_ATV",
@@ -10,14 +11,33 @@ const musicRows =
 const filtered = "data-youtube-tools-video";
 const blocked = "data-youtube-tools-blocked";
 const queueSelector = "ytmusic-player-queue,ytmusic-player-queue-item";
+const playbackMethods = [
+  "loadVideoByPlayerVars",
+  "cueVideoByPlayerVars",
+  "enqueueVideoByPlayerVars",
+  "playVideo",
+] as const;
+type PlaybackMethod = (typeof playbackMethods)[number];
+const continuationTimeout = 8000;
 
-type Track = { id: string; allowed: boolean };
+type Track = { id: string; allowed: boolean | undefined };
+type Selection = { id: string; index: number; item: unknown; list?: string };
+type Refill = {
+  tokens: Set<string>;
+  request: unknown;
+  timeout: ReturnType<typeof setTimeout>;
+};
 type Pending = {
   queue: object;
   player: object;
   id: string;
   index: number;
   previous?: string;
+  origin?: Selection;
+  list?: string;
+  initialUrl: string;
+  refill?: Refill;
+  recoverClip?: boolean;
   step: 1 | -1;
 };
 type Guard = { owner: object; wrapper: unknown; get?: () => unknown };
@@ -64,16 +84,6 @@ function object(value: unknown): value is object {
   return value !== null && typeof value === "object";
 }
 
-function read(value: unknown, ...keys: string[]): unknown {
-  try {
-    for (const key of keys) {
-      if (!object(value)) return;
-      value = Reflect.get(value, key);
-    }
-    return value;
-  } catch {}
-}
-
 function invoke(owner: unknown, key: string): unknown {
   const method = read(owner, key);
   if (typeof method !== "function") return;
@@ -87,17 +97,7 @@ function id(value: unknown): string | undefined {
 }
 
 function savedTrack(data: unknown): boolean {
-  const items = read(data, "menu", "menuRenderer", "items");
-  return (
-    Array.isArray(items) &&
-    items.some((item: unknown) => {
-      const toggle = read(item, "toggleMenuServiceItemRenderer");
-      return (
-        read(toggle, "defaultIcon", "iconType") === "BOOKMARK_BORDER" &&
-        read(toggle, "toggledIcon", "iconType") === "BOOKMARK"
-      );
-    })
-  );
+  return libraryItem(read(data, "menu", "menuRenderer")) !== undefined;
 }
 
 function track(data: unknown): Track | undefined {
@@ -132,18 +132,48 @@ function track(data: unknown): Track | undefined {
     if (typeof kind === "string")
       return { id: videoId, allowed: audioTracks.has(kind) };
   }
-  return { id: videoId, allowed: savedTrack(data) };
+  return { id: videoId, allowed: savedTrack(data) || undefined };
+}
+
+function queueRenderer(item: unknown): unknown {
+  return (
+    read(item, "playlistPanelVideoRenderer") ??
+    read(
+      item,
+      "playlistPanelVideoWrapperRenderer",
+      "primaryRenderer",
+      "playlistPanelVideoRenderer",
+    )
+  );
 }
 
 function queueTrack(item: unknown): Track | undefined {
-  return track(
-    read(item, "playlistPanelVideoRenderer") ??
-      read(
-        item,
-        "playlistPanelVideoWrapperRenderer",
-        "primaryRenderer",
-        "playlistPanelVideoRenderer",
-      ),
+  return track(queueRenderer(item));
+}
+
+function queueList(item: unknown): string | undefined {
+  return id(
+    read(
+      queueRenderer(item),
+      "navigationEndpoint",
+      "watchEndpoint",
+      "playlistId",
+    ),
+  );
+}
+
+function allowsQueueTrack(
+  track: Track | undefined,
+  index: number,
+  list: string | undefined,
+  selection: Selection | undefined,
+): boolean {
+  return (
+    track?.allowed ??
+    (track !== undefined &&
+      selection?.id === track.id &&
+      selection.index === index &&
+      selection.list === list)
   );
 }
 
@@ -171,20 +201,57 @@ function watchId(): string | undefined {
     return id(new URLSearchParams(location.search).get("v"));
 }
 
+function watchList(): string | undefined {
+  if (location.pathname === "/watch")
+    return id(new URLSearchParams(location.search).get("list"));
+}
+
+function matchesWatch(request: Pending): boolean {
+  const video = watchId();
+  return (
+    location.href === request.initialUrl ||
+    video === undefined ||
+    (watchList() === request.list &&
+      (video === request.origin?.id || video === request.id))
+  );
+}
+
+function infiniteQueue(store: unknown): boolean {
+  return read(invoke(store, "getState"), "queue", "isInfinite") === true;
+}
+
 function repeatAll(): boolean {
   return (
     read(document.querySelector("ytmusic-player-bar"), "repeatMode") === "ALL"
   );
 }
 
+function skipDirection(
+  from: number | undefined,
+  to: number,
+  count: number,
+  repeat: boolean,
+): 1 | -1 {
+  if (repeat && from === count - 1 && to === 0) return 1;
+  if (repeat && from === 0 && to === count - 1) return -1;
+  return from !== undefined && to < from ? -1 : 1;
+}
+
 export function music(): void {
+  const syncLibrary = musicLibrary();
   let app: Element | null = null;
   let queue: object | undefined;
   let currentPlayer: object | undefined;
-  let previous: { id: string; index: number; item: unknown } | undefined;
+  let previous: Selection | undefined;
+  let prior: Selection | undefined;
   let pending: Pending | undefined;
+  let preservingPlayer: object | undefined;
+  let mediaRestore: { request: Pending; song: string } | undefined;
+  let completed:
+    { list: string; origin: string; tokens: Set<string> } | undefined;
   const patched = new WeakMap<object, Map<string, Guard>>();
   const watchedPlayers = new WeakMap<object, () => unknown>();
+  const confirmedTracks = new Map<string, boolean>();
 
   GM_addStyle(`[${filtered}]{display:none!important}
     :root[${blocked}] ytmusic-player,
@@ -205,44 +272,219 @@ export function music(): void {
     );
   }
 
+  function stopPending(): void {
+    if (pending?.refill) clearTimeout(pending.refill.timeout);
+    pending = undefined;
+  }
+
+  function stopDirectClip(player: object, target: string): boolean {
+    if (watchId() !== target || watchList()) return false;
+    stopPending();
+    block(true);
+    invoke(player, "pauseVideo");
+    return true;
+  }
+
+  function preserveSelection(
+    request: Pending,
+    store: unknown,
+    origin: number,
+    fetchAt: number | undefined,
+  ): boolean {
+    const { queue: owner, player } = request;
+    const current = currentIndex(owner);
+    const song = request.origin?.id;
+    const recover =
+      request.recoverClip &&
+      song &&
+      read(invoke(player, "getVideoData"), "video_id") !== song;
+    if (fetchAt === undefined && current === origin && !recover) return true;
+    const dispatch = read(store, "dispatch");
+    const guards = patched.get(player);
+    if (
+      typeof dispatch !== "function" ||
+      !guards?.has("loadVideoByPlayerVars") ||
+      playbackMethods.some((name) => {
+        const method = read(player, name);
+        return (
+          typeof method === "function" && method !== guards.get(name)?.wrapper
+        );
+      })
+    )
+      return false;
+    const select = (index: number) => {
+      Reflect.apply(dispatch, store, [{ type: "SET_INDEX", payload: index }]);
+    };
+    preservingPlayer = player;
+    try {
+      try {
+        if (fetchAt !== undefined) {
+          if (current === fetchAt) select(origin);
+          if (!read(owner, "pendingFetchItemsRequest")) select(fetchAt);
+        } else if (recover && current === origin) {
+          select(request.index);
+        }
+      } finally {
+        if (stillActive(owner, player) && currentIndex(owner) !== origin) {
+          if (recover && song) mediaRestore = { request, song };
+          select(origin);
+        }
+      }
+      return currentIndex(owner) === origin;
+    } catch {
+      return false;
+    } finally {
+      preservingPlayer = undefined;
+      mediaRestore = undefined;
+    }
+  }
+
+  function finishQueueBoundary(request: Pending, rows: unknown[]): void {
+    const { queue: owner, origin, list } = request;
+    if (
+      !origin ||
+      !matchesWatch(request) ||
+      Math.sign(request.index - origin.index) !== request.step ||
+      queueTrack(rows[origin.index])?.id !== origin.id
+    ) {
+      if (request.refill) stopPending();
+      return;
+    }
+    const store = read(owner, "store");
+    const token = id(read(owner, "continuation"));
+    const finished =
+      completed && completed.list === list && completed.origin === origin.id
+        ? completed
+        : undefined;
+    const shouldFetch =
+      request.step === 1 &&
+      list !== undefined &&
+      infiniteQueue(store) &&
+      token !== undefined &&
+      !finished?.tokens.has(token) &&
+      !request.refill?.tokens.has(token) &&
+      !read(owner, "pendingFetchItemsRequest");
+    if (
+      !preserveSelection(
+        request,
+        store,
+        origin.index,
+        shouldFetch ? rows.length - 1 : undefined,
+      )
+    ) {
+      stopPending();
+      return;
+    }
+    const native =
+      request.step === 1 ? read(owner, "pendingFetchItemsRequest") : undefined;
+    if (typeof read(native, "then") !== "function") {
+      stopPending();
+      return;
+    }
+    const refill = (request.refill ??= {
+      tokens: new Set(),
+      request: undefined,
+      timeout: setTimeout(() => {
+        if (pending === request) stopPending();
+      }, continuationTimeout),
+    });
+    if (refill.request === native) return;
+    refill.request = native;
+    if (token) refill.tokens.add(token);
+    void Promise.resolve(native)
+      .then(() => {
+        if (pending !== request || refill.request !== native) return;
+        if (token && list && matchesWatch(request)) {
+          if (completed?.list !== list || completed.origin !== origin.id)
+            completed = { list, origin: origin.id, tokens: new Set() };
+          completed.tokens.add(token);
+        }
+        advance(request);
+      })
+      .catch(() => {
+        if (pending === request && refill.request === native) stopPending();
+      });
+  }
+
   function advance(request: Pending): void {
     if (pending !== request) return;
     const owner = request.queue;
     if (!stillActive(owner, request.player)) {
-      pending = undefined;
+      stopPending();
+      return;
+    }
+    if (stopDirectClip(request.player, request.id)) return;
+    if (!matchesWatch(request)) {
+      stopPending();
       return;
     }
     const rows = items(owner);
     const current = currentIndex(owner);
     const selected = queueTrack(rows[current])?.id;
-    if (selected !== request.id && selected !== request.previous) return;
+    const origin = request.refill ? request.origin : undefined;
+    const atOrigin = current === origin?.index && selected === origin.id;
+    const atRejected = current === request.index && selected === request.id;
+    if (request.refill && !atOrigin && !atRejected) {
+      stopPending();
+      return;
+    }
+    if (selected !== request.id && selected !== request.previous && !atOrigin)
+      return;
     const rejected =
-      selected === request.id
+      selected === request.id || atOrigin
         ? current
         : queueTrack(rows[request.index])?.id === request.id
           ? request.index
           : rows.findIndex((item) => queueTrack(item)?.id === request.id);
-    if (rejected < 0) return;
+    if (rejected < 0) {
+      if (request.refill) stopPending();
+      return;
+    }
     const repeat = repeatAll();
+    if (!request.refill && rejected !== request.index) {
+      request.index = rejected;
+      request.step = skipDirection(
+        request.origin?.index,
+        rejected,
+        rows.length,
+        repeat,
+      );
+    }
+    const routeList = watchList();
     for (let count = 1; count < rows.length; count++) {
       const next = rejected + count * request.step;
       if (!repeat && (next < 0 || next >= rows.length)) break;
       const index = (next + rows.length) % rows.length;
       const item = rows[index];
-      if (!queueTrack(item)?.allowed) continue;
+      const candidate = queueTrack(item);
+      if (
+        !candidate ||
+        !(
+          confirmedTracks.get(candidate.id) ??
+          allowsQueueTrack(
+            candidate,
+            index,
+            queueList(item) ?? routeList,
+            request.origin,
+          )
+        )
+      )
+        continue;
       const select = read(owner, "selectQueueItem");
-      pending = undefined;
+      stopPending();
       if (typeof select === "function" && stillActive(owner, request.player))
         Reflect.apply(select, owner, [item]);
       return;
     }
+    if (!repeat) finishQueueBoundary(request, rows);
   }
 
   function allow(
     owner: object,
     player: object,
     target: string,
-    selecting: boolean,
+    method: PlaybackMethod,
+    verified?: boolean,
   ): boolean {
     const rows = items(owner);
     const current = currentIndex(owner);
@@ -252,44 +494,105 @@ export function music(): void {
         ? current
         : rows.findIndex((item) => queueTrack(item)?.id === target);
     const result = queueTrack(rows[next]);
-    const allowed = playerTrack(player, target) ?? result?.allowed ?? false;
-    if (!selecting) return allowed;
+    const routeList = queueList(rows[next]) ?? watchList();
+    const confirmed = verified ?? playerTrack(player, target);
+    if (confirmed !== undefined && confirmedTracks.get(target) !== confirmed) {
+      confirmedTracks.set(target, confirmed);
+      const root = app;
+      queueMicrotask(() => {
+        if (root?.isConnected && root === app)
+          root.querySelectorAll(musicRows).forEach(update);
+      });
+    }
+    const allowed =
+      confirmedTracks.get(target) ??
+      allowsQueueTrack(result, next, routeList, previous);
+    if (
+      method === "enqueueVideoByPlayerVars" ||
+      method === "cueVideoByPlayerVars"
+    )
+      return allowed;
     if (allowed) {
-      pending = undefined;
-      previous = { id: target, index: next, item: rows[next] };
       block(false);
+      const active = pending;
+      if (
+        method === "playVideo" &&
+        active?.origin?.id === target &&
+        (current === active.origin.index || current === active.index) &&
+        matchesWatch(active)
+      )
+        return true;
+      stopPending();
+      if (previous?.list !== routeList) prior = undefined;
+      else if (previous?.id !== target) prior = previous;
+      previous = {
+        id: target,
+        index: next,
+        item: rows[next],
+        ...(routeList ? { list: routeList } : {}),
+      };
       return true;
     }
+    if (stopDirectClip(player, target)) return false;
+    if (confirmedTracks.get(target) === false && previous?.id === target) {
+      previous =
+        prior && confirmedTracks.get(prior.id) !== false ? prior : undefined;
+      prior = undefined;
+    }
+    const list = routeList ?? previous?.list;
+    const retained = previous ? rows.indexOf(previous.item) : -1;
     if (
-      watchId() === target &&
-      !new URLSearchParams(location.search).get("list")
+      previous &&
+      list &&
+      previous.list !== list &&
+      (previous.list || retained < 0)
     ) {
-      pending = undefined;
-      block(true);
-      invoke(player, "pauseVideo");
-      return false;
+      previous = undefined;
+      prior = undefined;
     }
     if (!previous || previous.id === target) block(true);
     const old =
       previous &&
-      (queueTrack(rows[previous.index])?.id === previous.id
-        ? previous.index
-        : rows.indexOf(previous.item));
+      (retained >= 0
+        ? retained
+        : queueTrack(rows[previous.index])?.id === previous.id
+          ? previous.index
+          : -1);
+    if (previous && old !== undefined && old >= 0 && old !== previous.index)
+      previous = { ...previous, index: old };
     if (next < 0) {
-      pending = undefined;
+      stopPending();
       return false;
     }
-    let step: 1 | -1 = old !== undefined && next < old ? -1 : 1;
-    if (repeatAll()) {
-      if (old === rows.length - 1 && next === 0) step = 1;
-      if (old === 0 && next === rows.length - 1) step = -1;
+    const step = skipDirection(old, next, rows.length, repeatAll());
+    const recoverClip =
+      verified === false || (confirmed === false && method === "playVideo");
+    const active = pending;
+    if (
+      active?.refill &&
+      active.queue === owner &&
+      active.player === player &&
+      active.id === target &&
+      active.index === next &&
+      active.step === step &&
+      active.list === list &&
+      active.origin === previous
+    ) {
+      if (recoverClip) active.recoverClip = true;
+      queueMicrotask(() => advance(active));
+      return false;
     }
+    stopPending();
     const request: Pending = {
       queue: owner,
       player,
       id: target,
       index: next,
       ...(selected ? { previous: selected.id } : {}),
+      ...(previous ? { origin: previous } : {}),
+      ...(list ? { list } : {}),
+      initialUrl: location.href,
+      ...(recoverClip ? { recoverClip: true } : {}),
       step,
     };
     pending = request;
@@ -303,12 +606,7 @@ export function music(): void {
       methods = new Map();
       patched.set(player, methods);
     }
-    for (const name of [
-      "loadVideoByPlayerVars",
-      "cueVideoByPlayerVars",
-      "enqueueVideoByPlayerVars",
-      "playVideo",
-    ] as const) {
+    for (const name of playbackMethods) {
       const descriptor = ownProperty(player, name);
       const last = methods.get(name);
       if (last?.get && descriptor?.get === last.get) {
@@ -329,7 +627,6 @@ export function music(): void {
           apply(method, receiver: unknown, args: unknown[]) {
             const owner = entry.owner;
             if (stillActive(owner, player)) {
-              const selecting = name !== "enqueueVideoByPlayerVars";
               const target =
                 name === "playVideo"
                   ? (id(read(invoke(player, "getVideoData"), "video_id")) ??
@@ -337,7 +634,21 @@ export function music(): void {
                     watchId())
                   : (id(read(args[0], "video_id")) ??
                     id(read(args[0], "videoId")));
-              if (target && !allow(owner, player, target, selecting)) return;
+              if (preservingPlayer === player) {
+                const restore = mediaRestore;
+                if (
+                  name !== "loadVideoByPlayerVars" ||
+                  !restore ||
+                  target !== restore.song
+                )
+                  return;
+                mediaRestore = undefined;
+                const result: unknown = Reflect.apply(method, receiver, args);
+                restore.request.recoverClip = false;
+                block(false);
+                return result;
+              }
+              if (target && !allow(owner, player, target, name)) return;
             }
             const result: unknown = Reflect.apply(method, receiver, args);
             return result;
@@ -387,13 +698,20 @@ export function music(): void {
       queue = owner;
       currentPlayer = player;
       previous = undefined;
-      pending = undefined;
+      prior = undefined;
+      completed = undefined;
+      stopPending();
     }
     if (owner && player) guard(owner, player);
   }
 
   function update(row: Element): void {
-    row.toggleAttribute(filtered, track(read(row, "data"))?.allowed === false);
+    const candidate = track(read(row, "data"));
+    row.toggleAttribute(
+      filtered,
+      candidate !== undefined &&
+        !(confirmedTracks.get(candidate.id) ?? candidate.allowed),
+    );
   }
 
   function collect(node: Node, changed: Set<Element>): void {
@@ -405,6 +723,7 @@ export function music(): void {
   const observer = new MutationObserver((records) => {
     if (!app?.isConnected) return;
     updateQueue();
+    if (records.some(libraryMutation)) syncLibrary(app);
     const changed = new Set<Element>();
     let queueChanged = false;
     for (const record of records) {
@@ -432,16 +751,22 @@ export function music(): void {
   });
 
   function attach(): void {
-    app = document.querySelector(appSelector);
+    const root = document.querySelector(appSelector);
+    if (root !== app) confirmedTracks.clear();
+    app = root;
     observer.disconnect();
     observeAppTree(lifecycle, app);
     updateQueue();
-    if (!app) return;
+    if (!app) {
+      syncLibrary(null);
+      return;
+    }
     observer.observe(app, {
       subtree: true,
       childList: true,
       characterData: true,
     });
+    syncLibrary(app);
     for (const row of app.querySelectorAll(musicRows)) update(row);
   }
 
@@ -458,9 +783,10 @@ export function music(): void {
       const target =
         id(read(invoke(player, "getVideoData"), "video_id")) ?? watchId();
       if (!target) return;
+      const verified = playerTrack(player, target);
       const allowed = queue
-        ? allow(queue, player, target, true)
-        : (playerTrack(player, target) ?? false);
+        ? allow(queue, currentPlayer ?? player, target, "playVideo", verified)
+        : (verified ?? false);
       block(!allowed);
       if (!allowed) video.pause();
     },
