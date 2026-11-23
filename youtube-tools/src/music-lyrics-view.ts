@@ -14,7 +14,8 @@ export function styleLyrics(shelf: string): void {
     ytmusic-tab-renderer[${activeLyricsPanel}] { position:relative; overflow:hidden!important }
     [${activeLyricsPanel}] ${shelf} { position:absolute; inset:auto 0 0; pointer-events:none }
     [${activeLyricsPanel}] ${shelf} :is(.description,#description-button,.footer) { display:none!important }
-    .${viewportClass} { position:absolute; inset:0; overflow:hidden auto; overscroll-behavior-y:contain; overflow-anchor:none; scroll-behavior:auto }
+    .${viewportClass} { position:absolute; inset:0; overflow:hidden auto; overscroll-behavior-y:contain; overflow-anchor:none; scroll-behavior:auto; scrollbar-width:none }
+    .${viewportClass}::-webkit-scrollbar { display:none }
     .${listClass} {
       position:relative; display:grid; gap:clamp(12px,2vh,24px); color:#fff;
       padding-inline:clamp(16px,3vw,36px); font-size:clamp(23px,3.5vw,32px); font-weight:700; line-height:1.18
