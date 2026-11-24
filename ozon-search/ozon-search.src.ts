@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ozon - Rating and Review Filters
 // @namespace    https://github.com/sashokey/browser-userscripts
-// @version      1.1.6
+// @version      2
 // @description  Violentmonkey: adds rating and review ranges and a 30-minute delivery switch for Ozon Fresh. Filters loaded and newly loaded products.
 // @match        https://www.ozon.ru/*
 // @match        https://ozon.ru/*

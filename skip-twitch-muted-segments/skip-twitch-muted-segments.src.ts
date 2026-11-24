@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Skip Twitch Muted Segments
 // @namespace    local.skip-twitch-muted-segments
-// @version      1.0.6
+// @version      2
 // @description  Violentmonkey userscript that automatically skips red muted segments in Twitch video recordings.
 // @match        https://www.twitch.tv/*
 // @noframes

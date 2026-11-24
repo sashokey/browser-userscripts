@@ -31,7 +31,8 @@ Each workflow runs on pushes and pull requests and supports manual dispatch. Run
 ## Maintenance
 
 - Treat each `*.src.ts` and its imported modules as the source of truth. Regenerate the corresponding `*.user.js` with `npm run build`. Keep the single classic script, matching metadata, and reproducible bytes. Commit the generated file for direct installation.
-- Increase the numeric `@version` of a changed userscript, including metadata changes. Keep its README installation link, `@updateURL`, and `@downloadURL` on the same raw file in `master` so published Git tags can advance independently of update URLs. Keep `@name` and `@namespace` stable because they determine the installed identity.
+- Use a single positive integer for `@version` (`1`, `2`, `3`, …). Start each new script at `1` and increment its version by one whenever its distributed code or metadata changes.
+- Keep each script's README installation link, `@updateURL`, and `@downloadURL` on the same raw file in `master` so published Git tags can advance independently of update URLs. Keep `@name` and `@namespace` stable because they determine the installed identity.
 - Use the root GPL-3.0 `LICENSE` for project code and preserve mandatory third-party notices. Keep the root `README.md` and `AGENTS.md` as the repository's Markdown files. Update this guide when project rules, behavior, or verification procedures change.
 - Ozon uses Navigation API events to reset filters on URL changes. On browsers without the API, verify back and forward navigation and SPA transitions that render a listing.
 - Twitch uses the committed recording identifier exposed by the player and seekbar in the page context when available. During a transition, verify the new media and its seekbar together before applying any muted range.
@@ -50,5 +51,5 @@ Each workflow runs on pushes and pull requests and supports manual dispatch. Run
 ## Release
 
 1. Verify the published `master` commit in all three workflows and complete the installation and update checks for the release files.
-2. Use `v1` for the first GitHub release and Git tag. For every subsequent release, including fixes and prereleases, increment `N` by one. Use the same `vN` for the release title and tag. Keep the userscripts' numeric `@version` values for Violentmonkey.
+2. Use `v1` for the first GitHub release and Git tag. For every subsequent release, including fixes and prereleases, increment `N` by one. Use the same `vN` for the release title and tag. Each userscript has its own `@version` sequence.
 3. Create the tag at the verified commit. Describe changes since the previous release. If attaching installable assets, use the verified userscript bytes and include `vN` in their filenames. Verify the tag, publication status, and asset links in GitHub.
