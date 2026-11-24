@@ -10,6 +10,7 @@ class Element extends EventTarget {
   textContent = "";
   className = "";
   parent: Element | undefined;
+  nativeShelf: Element | undefined;
   scrollTop = 0;
   clientHeight = 200;
   offsetHeight = 24;
@@ -50,6 +51,8 @@ class Element extends EventTarget {
   }
 
   querySelector(selector: string): Element | undefined {
+    if (selector.endsWith(" .footer"))
+      return this.nativeShelf?.querySelector(".footer");
     return this.children.find((child) => `.${child.className}` === selector);
   }
 
@@ -69,8 +72,8 @@ const lyrics = [
 ];
 
 void test("the source follows the lyrics and selecting a row seeks without resuming playback", (context) => {
-  const { panel, shelf, video, signal } = fixture(context);
-  Reflect.apply(renderLyrics, null, [panel, shelf, video, lyrics, signal]);
+  const { panel, video, signal } = fixture(context);
+  Reflect.apply(renderLyrics, null, [panel, video, lyrics, signal]);
   const view = panel.children[0];
   const list = view?.children[0];
   const row = list?.children[1];
@@ -89,10 +92,9 @@ void test("the source follows the lyrics and selecting a row seeks without resum
 });
 
 void test("the source footer follows late changes to the native attribution", (context) => {
-  const { panel, shelf, video, signal, source, notifySource } =
-    fixture(context);
+  const { panel, video, signal, source, notifySource } = fixture(context);
   source.textContent = "";
-  Reflect.apply(renderLyrics, null, [panel, shelf, video, lyrics, signal]);
+  Reflect.apply(renderLyrics, null, [panel, video, lyrics, signal]);
   const view = panel.children[0];
   assert.ok(view);
   assert.equal(view.children.length, 1);
@@ -113,8 +115,8 @@ void test("the source footer follows late changes to the native attribution", (c
 });
 
 void test("keyboard activation consumes the player shortcut and seeks to the focused line", (context) => {
-  const { panel, shelf, video, signal, browserWindow } = fixture(context);
-  Reflect.apply(renderLyrics, null, [panel, shelf, video, lyrics, signal]);
+  const { panel, video, signal, browserWindow } = fixture(context);
+  Reflect.apply(renderLyrics, null, [panel, video, lyrics, signal]);
   const focused = panel.children[0]?.children[0]?.children[1];
   assert.ok(focused);
   const event = new Event("keydown", { cancelable: true });
@@ -129,8 +131,8 @@ void test("keyboard activation consumes the player shortcut and seeks to the foc
 });
 
 void test("manual scrolling postpones following until two seconds after the last activity", (context) => {
-  const { panel, shelf, video, signal } = fixture(context);
-  Reflect.apply(renderLyrics, null, [panel, shelf, video, lyrics, signal]);
+  const { panel, video, signal } = fixture(context);
+  Reflect.apply(renderLyrics, null, [panel, video, lyrics, signal]);
   const view = panel.children[0];
   const last = view?.children[0]?.children[2];
   assert.ok(view && last);
@@ -151,8 +153,8 @@ void test("manual scrolling postpones following until two seconds after the last
 });
 
 void test("closing the lyrics cancels the pending return to the active row", (context) => {
-  const { panel, shelf, video, signal, end } = fixture(context);
-  Reflect.apply(renderLyrics, null, [panel, shelf, video, lyrics, signal]);
+  const { panel, video, signal, end } = fixture(context);
+  Reflect.apply(renderLyrics, null, [panel, video, lyrics, signal]);
   const view = panel.children[0];
   assert.ok(view);
   view.scrollTop = 26;
@@ -177,6 +179,7 @@ function fixture(context: TestContext) {
   source.className = "footer";
   source.textContent = "Source: Example";
   shelf.append(source);
+  panel.nativeShelf = shelf;
   const video = new Element("video");
   let sourceChange: (() => void) | undefined;
   const browserWindow = Object.assign(new EventTarget(), {
@@ -211,7 +214,6 @@ function fixture(context: TestContext) {
   });
   return {
     panel,
-    shelf,
     video,
     browserWindow,
     source,

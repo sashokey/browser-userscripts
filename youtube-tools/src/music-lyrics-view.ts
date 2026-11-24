@@ -2,6 +2,10 @@ import { activeLyricIndex } from "./music-lyrics-data.ts";
 import type { TimedLyric } from "./music-lyrics-data.ts";
 
 export const activeLyricsPanel = "data-youtube-tools-synced-lyrics";
+export const pendingLyricsPanel = "data-youtube-tools-lyrics-pending";
+export const plainLyricsPanel = "data-youtube-tools-plain-lyrics";
+const shelfSelector =
+  "ytmusic-description-shelf-renderer[is-track-lyrics-page]";
 const viewportClass = "youtube-tools-lyrics-viewport";
 const listClass = "youtube-tools-lyrics-lines";
 const sourceClass = "youtube-tools-lyrics-source";
@@ -9,16 +13,27 @@ const anchor = 0.42;
 const followDelay = 2000;
 const transitionDuration = 360;
 
-export function styleLyrics(shelf: string): void {
+export function styleLyrics(): void {
   GM_addStyle(`
     ytmusic-tab-renderer[${activeLyricsPanel}] { position:relative; overflow:hidden!important }
-    [${activeLyricsPanel}] ${shelf} { position:absolute; inset:auto 0 0; pointer-events:none }
-    [${activeLyricsPanel}] ${shelf} :is(.description,#description-button,.footer) { display:none!important }
+    [${activeLyricsPanel}] ${shelfSelector} { position:absolute; inset:auto 0 0; pointer-events:none }
+    [${activeLyricsPanel}] ${shelfSelector} :is(.description,#description-button,.footer) { display:none!important }
+    [${pendingLyricsPanel}] { position:relative }
+    [${pendingLyricsPanel}] ${shelfSelector} { visibility:hidden!important }
+    [${pendingLyricsPanel}]::before {
+      content:""; display:block; position:absolute; inset:24px auto auto 50%;
+      width:24px; height:24px; margin-inline-start:-12px; border:2px solid #666;
+      border-top-color:#fff; border-radius:50%; animation:youtube-tools-lyrics-loading .8s linear infinite
+    }
+    @keyframes youtube-tools-lyrics-loading { to { transform:rotate(360deg) } }
     .${viewportClass} { position:absolute; inset:0; overflow:hidden auto; overscroll-behavior-y:contain; overflow-anchor:none; scroll-behavior:auto; scrollbar-width:none }
     .${viewportClass}::-webkit-scrollbar { display:none }
+    .${listClass}, [${plainLyricsPanel}] ${shelfSelector} .description {
+      color:#fff; font-size:clamp(23px,3.5vw,32px); font-weight:700; line-height:1.18
+    }
     .${listClass} {
-      position:relative; display:grid; gap:clamp(12px,2vh,24px); color:#fff;
-      padding-inline:clamp(16px,3vw,36px); font-size:clamp(23px,3.5vw,32px); font-weight:700; line-height:1.18
+      position:relative; display:grid; gap:clamp(12px,2vh,24px);
+      padding-inline:clamp(16px,3vw,36px)
     }
     .${listClass} > button {
       background:none; border:0; padding:0; font:inherit; color:inherit; text-align:start;
@@ -28,13 +43,15 @@ export function styleLyrics(shelf: string): void {
     .${listClass} > [aria-current=true] { opacity:1 }
     .${listClass} > button:focus-visible { outline:2px solid currentColor; outline-offset:4px }
     .${sourceClass} { color:var(--ytmusic-color-light-secondary,#aaa); padding:0 clamp(16px,3vw,36px) 12px; font-size:14px }
-    @media (prefers-reduced-motion: reduce) { .${listClass} > button { transition:none } }
+    @media (prefers-reduced-motion: reduce) {
+      .${listClass} > button { transition:none }
+      [${pendingLyricsPanel}]::before { animation:none }
+    }
   `);
 }
 
 export function renderLyrics(
   panel: HTMLElement,
-  shelf: HTMLElement,
   video: HTMLVideoElement,
   lyrics: readonly TimedLyric[],
   signal: AbortSignal,
@@ -55,7 +72,9 @@ export function renderLyrics(
   const footer = document.createElement("div");
   footer.className = sourceClass;
   function updateSource(): void {
-    const source = shelf.querySelector(".footer")?.textContent?.trim();
+    const source = panel
+      .querySelector(`${shelfSelector} .footer`)
+      ?.textContent?.trim();
     if (!source) {
       footer.remove();
       return;
@@ -65,10 +84,12 @@ export function renderLyrics(
   }
   updateSource();
   const sourceObserver = new MutationObserver(updateSource);
-  sourceObserver.observe(shelf, {
+  sourceObserver.observe(panel, {
     subtree: true,
     childList: true,
     characterData: true,
+    attributes: true,
+    attributeFilter: ["is-track-lyrics-page"],
   });
   panel.append(viewport);
   panel.scrollTop = 0;

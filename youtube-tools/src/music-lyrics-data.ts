@@ -1,4 +1,5 @@
 export type TimedLyric = { text: string; start: number };
+export const lyricsTimeout = 8000;
 
 function readField(value: unknown, ...keys: string[]): unknown {
   for (const key of keys) {
@@ -76,10 +77,12 @@ export async function fetchTimedLyrics(
   videoId: string,
   webVersion: string,
   lifetime: AbortSignal,
+  onAvailability?: (available: boolean) => void,
+  timeout = lyricsTimeout,
 ): Promise<TimedLyric[] | undefined> {
   if (!/^[\w-]{11}$/.test(videoId) || !/^\d+(?:\.\d+)+$/.test(webVersion))
     return;
-  const signal = AbortSignal.any([lifetime, AbortSignal.timeout(8000)]);
+  const signal = AbortSignal.any([lifetime, AbortSignal.timeout(timeout)]);
   try {
     const watch = await request(
       "next",
@@ -101,25 +104,31 @@ export async function fetchTimedLyrics(
     );
     if (!Array.isArray(tabs)) return;
     const candidates: unknown[] = tabs;
-    const browseId = candidates
-      .map((tab) =>
-        readField(tab, "tabRenderer", "endpoint", "browseEndpoint", "browseId"),
-      )
-      .find(
-        (id): id is string => typeof id === "string" && /^MPLY[\w-]+$/.test(id),
+    for (const tab of candidates) {
+      const renderer = readField(tab, "tabRenderer");
+      const browseId = readField(
+        renderer,
+        "endpoint",
+        "browseEndpoint",
+        "browseId",
       );
-    if (!browseId) return;
-    const lyrics = await request(
-      "browse",
-      {
-        clientName: "ANDROID_MUSIC",
-        clientVersion: "7.21.50",
-        platform: "MOBILE",
-      },
-      { browseId },
-      signal,
-    );
-    return parseTimedLyrics(lyrics);
+      if (typeof browseId !== "string" || !/^MPLY[\w-]+$/.test(browseId))
+        continue;
+      const available = readField(renderer, "unselectable") !== true;
+      onAvailability?.(available);
+      if (!available) return;
+      const lyrics = await request(
+        "browse",
+        {
+          clientName: "ANDROID_MUSIC",
+          clientVersion: "7.21.50",
+          platform: "MOBILE",
+        },
+        { browseId },
+        signal,
+      );
+      return parseTimedLyrics(lyrics);
+    }
   } catch {
     return;
   }
