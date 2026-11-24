@@ -73,7 +73,10 @@ for (const host of hosts) {
     { timeout: 65000 },
     async (t) => {
       await freshPage(browser, host, async (page) => {
-        if (!(await openYouTube(page, host, playlistPath(), t))) return;
+        const opened = await openYouTube(page, host, playlistPath(), t, {
+          stockPlayback: true,
+        });
+        if (!opened) return;
         assert.equal(
           await page.locator("#previewbar,#sbSkipIconControlBarImage").count(),
           0,

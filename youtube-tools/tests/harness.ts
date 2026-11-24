@@ -44,7 +44,7 @@ export async function openYouTube(
   host: Host,
   path: string,
   test: TestContext,
-  language = "en",
+  { stockPlayback = false, language = "en" } = {},
 ): Promise<boolean> {
   await page.goto(urlFor(host, path, language).href, {
     waitUntil: "domcontentloaded",
@@ -56,7 +56,9 @@ export async function openYouTube(
   if (await reject.isVisible()) await reject.click();
   const opened = new URL(page.url());
   if (opened.hostname !== host) {
-    const reason = await recordGuestNavigationBlock(host, opened);
+    const reason = await recordGuestNavigationBlock(host, opened, {
+      stockPlayback,
+    });
     if (reason) {
       test.skip(reason);
       return false;

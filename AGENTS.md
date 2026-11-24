@@ -24,7 +24,7 @@ In the browser-test environment, run `npx playwright install chromium` and `npm 
 
 - `.github/workflows/ozon-search.yml` checks syntax, lint, types, reproducibility, product filtering, cart and listing lifecycle, and sensitivity to rating and delivery regressions.
 - `.github/workflows/skip-twitch-muted-segments.yml` checks syntax, lint, types, reproducibility, seekbar and playback behavior, and sensitivity to paused playback and channel recording regressions.
-- `.github/workflows/youtube-tools.yml` checks types, lint, reproducibility, desktop and mobile behavior, and the YouTube Music playback guard. Its integration job checks live desktop and mobile YouTube, including SponsorBlock. Report stock guest-playback challenges and confirmed Google unusual-traffic redirects recorded by the job as skipped coverage. Use the manual checks below for live YouTube Music.
+- `.github/workflows/youtube-tools.yml` checks types, lint, reproducibility, desktop and mobile behavior, and the YouTube Music playback guard. Its integration job checks live desktop and mobile YouTube, including SponsorBlock. Report stock guest-playback challenges and confirmed Google unusual-traffic redirects as skipped coverage. A blocked stock playlist also skips dependent playback tests for that host. Use the manual checks below for live YouTube Music.
 
 Each workflow runs on pushes and pull requests and supports manual dispatch. Run its commands from the script directory and use that directory's lockfile for caching. Verify every workflow for the published commit SHA.
 

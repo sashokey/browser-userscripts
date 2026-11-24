@@ -16,10 +16,14 @@ void test("only a Google unusual-traffic redirect records a skip for the affecte
   const directory = await mkdtemp(join(tmpdir(), "youtube-tools-guest-"));
   try {
     const summary = join(directory, "summary");
-    const env = { GITHUB_ACTIONS: "true", GITHUB_STEP_SUMMARY: summary };
+    const env = {
+      GITHUB_ACTIONS: "true",
+      GITHUB_ENV: join(directory, "env"),
+      GITHUB_STEP_SUMMARY: summary,
+    };
     const blocked = new URL("https://www.google.com/sorry/index");
     assert.equal(
-      await recordGuestNavigationBlock("m.youtube.com", blocked, {}),
+      await recordGuestNavigationBlock("m.youtube.com", blocked, { env: {} }),
       false,
     );
     for (const url of [
@@ -29,13 +33,15 @@ void test("only a Google unusual-traffic redirect records a skip for the affecte
       "https://consent.youtube.com/",
     ]) {
       assert.equal(
-        await recordGuestNavigationBlock("m.youtube.com", new URL(url), env),
+        await recordGuestNavigationBlock("m.youtube.com", new URL(url), {
+          env,
+        }),
         false,
       );
     }
     await assert.rejects(readFile(summary), { code: "ENOENT" });
     assert.match(
-      (await recordGuestNavigationBlock("m.youtube.com", blocked, env)) || "",
+      (await recordGuestNavigationBlock("m.youtube.com", blocked, { env })) || "",
       /unusual traffic/i,
     );
     assert.match(
@@ -43,6 +49,18 @@ void test("only a Google unusual-traffic redirect records a skip for the affecte
       /m\.youtube\.com.*skipped.*unusual traffic/i,
     );
     assert.equal(guestPlaybackSkip("m.youtube.com", env), false);
+    await assert.rejects(readFile(env.GITHUB_ENV), { code: "ENOENT" });
+    const reason = await recordGuestNavigationBlock("m.youtube.com", blocked, {
+      env,
+      stockPlayback: true,
+    });
+    const value = await readFile(env.GITHUB_ENV, "utf8");
+    const subsequentStep = {
+      GITHUB_ACTIONS: "true",
+      ...Object.fromEntries(new URLSearchParams(value.trim())),
+    };
+    assert.equal(guestPlaybackSkip("m.youtube.com", subsequentStep), reason);
+    assert.equal(guestPlaybackSkip("www.youtube.com", subsequentStep), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

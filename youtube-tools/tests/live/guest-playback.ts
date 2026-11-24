@@ -4,11 +4,13 @@ import type { Host } from "../harness.ts";
 const skipReason =
   "Clean YouTube required sign-in to confirm the viewer is not a bot";
 const botChallenge = /^sign in to confirm you['’]re not a bot[.!]?$/i;
+const trafficBlock = "GOOGLE_UNUSUAL_TRAFFIC";
+const trafficReason = "Google reported unusual traffic from the runner";
 
 export async function recordGuestNavigationBlock(
   host: Host,
   url: URL,
-  env = process.env,
+  { stockPlayback = false, env = process.env } = {},
 ): Promise<string | false> {
   if (
     env.GITHUB_ACTIONS !== "true" ||
@@ -17,12 +19,13 @@ export async function recordGuestNavigationBlock(
     (url.pathname !== "/sorry/index" && url.pathname !== "/sorry/")
   )
     return false;
-  const reason = "Google reported unusual traffic from the runner";
   await appendFile(
     env.GITHUB_STEP_SUMMARY,
-    `- **${host}** live test skipped. ${reason}.\n`,
+    `- **${host}** live test skipped. ${trafficReason}.\n`,
   );
-  return reason;
+  if (stockPlayback && env.GITHUB_ENV)
+    await appendFile(env.GITHUB_ENV, `${blockVariable(host)}=${trafficBlock}\n`);
+  return trafficReason;
 }
 
 function blockVariable(host: Host): string {
@@ -33,9 +36,10 @@ export function guestPlaybackSkip(
   host: Host,
   env = process.env,
 ): string | false {
-  return env.GITHUB_ACTIONS === "true" && env[blockVariable(host)] === "1"
-    ? skipReason
-    : false;
+  if (env.GITHUB_ACTIONS !== "true") return false;
+  const value = env[blockVariable(host)];
+  if (value === trafficBlock) return trafficReason;
+  return value === "1" ? skipReason : false;
 }
 
 export async function recordGuestPlaybackBlock(
