@@ -108,10 +108,16 @@ for (const host of hosts) {
   void test(
     `${host} quick feedback overlays a real guest search card`,
     { timeout: 45000 },
-    async () => {
+    async (t) => {
       await freshPage(browser, host, async (page, context) => {
         await candidate(context);
-        await openYouTube(page, host, "/results?search_query=YouTube+Creators");
+        const opened = await openYouTube(
+          page,
+          host,
+          "/results?search_query=YouTube+Creators",
+          t,
+        );
+        if (!opened) return;
         const card = page
           .locator(
             host === "m.youtube.com"
@@ -169,11 +175,11 @@ for (const host of hosts) {
   void test(
     `${host} real audio-only playback keeps the native element and opens no video buffer`,
     { timeout: 60000, skip: guestPlaybackSkip(host) },
-    async () => {
+    async (t) => {
       await freshPage(browser, host, async (page, context) => {
         await candidate(context, { audioOnly: true });
         await observeBuffers(page);
-        await openYouTube(page, host, playlistPath());
+        if (!(await openYouTube(page, host, playlistPath(), t))) return;
         await play(page);
         await playback(page, "audio");
         await onlyAudioBuffers(page);
@@ -188,10 +194,10 @@ for (const host of hosts) {
   void test(
     `${host} both audio-mode changes take effect after a native preload`,
     { timeout: 90000, skip: guestPlaybackSkip(host) },
-    async () => {
+    async (t) => {
       await freshPage(browser, host, async (page, context) => {
         await candidate(context, { audioOnly: true });
-        await openYouTube(page, host, playlistPath());
+        if (!(await openYouTube(page, host, playlistPath(), t))) return;
         await play(page);
         await playback(page, "audio");
         const start = await page.evaluate(() => performance.timeOrigin);
@@ -224,10 +230,10 @@ for (const host of hosts) {
   void test(
     `${host} a real playlist stops at the end and keeps its native Next and Previous actions`,
     { timeout: 85000, skip: guestPlaybackSkip(host) },
-    async () => {
+    async (t) => {
       await freshPage(browser, host, async (page, context) => {
         await candidate(context);
-        await openYouTube(page, host, playlistPath());
+        if (!(await openYouTube(page, host, playlistPath(), t))) return;
         await play(page);
         await seekNearEnd(page);
         await page.waitForFunction(

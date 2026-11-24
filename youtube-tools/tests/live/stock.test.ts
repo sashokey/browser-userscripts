@@ -28,9 +28,15 @@ for (const host of hosts) {
   void test(
     `${host} real guest search renders a native card and action control without extensions`,
     { timeout: 45000 },
-    async () => {
+    async (t) => {
       await freshPage(browser, host, async (page) => {
-        await openYouTube(page, host, "/results?search_query=YouTube+Creators");
+        const opened = await openYouTube(
+          page,
+          host,
+          "/results?search_query=YouTube+Creators",
+          t,
+        );
+        if (!opened) return;
         const card = page
           .locator(
             host === "m.youtube.com"
@@ -67,7 +73,7 @@ for (const host of hosts) {
     { timeout: 65000 },
     async (t) => {
       await freshPage(browser, host, async (page) => {
-        await openYouTube(page, host, playlistPath());
+        if (!(await openYouTube(page, host, playlistPath(), t))) return;
         assert.equal(
           await page.locator("#previewbar,#sbSkipIconControlBarImage").count(),
           0,

@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import type { TestContext } from "node:test";
 import { devices } from "playwright";
 import type {
   Browser,
@@ -6,6 +7,7 @@ import type {
   BrowserContextOptions,
   Page,
 } from "playwright";
+import { recordGuestNavigationBlock } from "./live/guest-playback.ts";
 
 export const hosts = ["www.youtube.com", "m.youtube.com"] as const;
 export type Host = (typeof hosts)[number];
@@ -41,8 +43,9 @@ export async function openYouTube(
   page: Page,
   host: Host,
   path: string,
+  test: TestContext,
   language = "en",
-): Promise<void> {
+): Promise<boolean> {
   await page.goto(urlFor(host, path, language).href, {
     waitUntil: "domcontentloaded",
     timeout: 25000,
@@ -51,12 +54,22 @@ export async function openYouTube(
     .getByRole("button", { name: "Reject all", exact: true })
     .first();
   if (await reject.isVisible()) await reject.click();
-  if (new URL(page.url()).hostname !== host)
-    throw new Error(`Expected ${host}; opened ${new URL(page.url()).hostname}`);
+  const opened = new URL(page.url());
+  if (opened.hostname !== host) {
+    const reason = await recordGuestNavigationBlock(host, opened);
+    if (reason) {
+      test.skip(reason);
+      return false;
+    }
+    throw new Error(
+      `Expected ${host}; opened ${opened.origin}${opened.pathname}`,
+    );
+  }
   await page
     .locator(appTag(host))
     .first()
     .waitFor({ state: "attached", timeout: 12000 });
+  return true;
 }
 
 export async function freshPage(

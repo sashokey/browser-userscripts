@@ -5,6 +5,26 @@ const skipReason =
   "Clean YouTube required sign-in to confirm the viewer is not a bot";
 const botChallenge = /^sign in to confirm you['’]re not a bot[.!]?$/i;
 
+export async function recordGuestNavigationBlock(
+  host: Host,
+  url: URL,
+  env = process.env,
+): Promise<string | false> {
+  if (
+    env.GITHUB_ACTIONS !== "true" ||
+    !env.GITHUB_STEP_SUMMARY ||
+    url.origin !== "https://www.google.com" ||
+    (url.pathname !== "/sorry/index" && url.pathname !== "/sorry/")
+  )
+    return false;
+  const reason = "Google reported unusual traffic from the runner";
+  await appendFile(
+    env.GITHUB_STEP_SUMMARY,
+    `- **${host}** live test skipped. ${reason}.\n`,
+  );
+  return reason;
+}
+
 function blockVariable(host: Host): string {
   return `YOUTUBE_GUEST_PLAYBACK_${host.toUpperCase().replaceAll(".", "_")}_BLOCKED`;
 }

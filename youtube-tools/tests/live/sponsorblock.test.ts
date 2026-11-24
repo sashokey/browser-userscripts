@@ -126,14 +126,15 @@ for (const host of hosts) {
     void test(
       `${host} SponsorBlock can ${mode === "automatic" ? "auto-skip" : "manually skip"} a public segment and undo it in audio-only mode`,
       { timeout: 100000, skip: guestPlaybackSkip(host) },
-      async () => {
+      async (t) => {
         const range = await sponsorRange(sponsorVideo, "sponsor");
         await withSponsor(
           host,
           mode === "automatic" ? 2 : 1,
           "sponsor",
           async (page) => {
-            await openYouTube(page, host, `/watch?v=${sponsorVideo}`);
+            if (!(await openYouTube(page, host, `/watch?v=${sponsorVideo}`, t)))
+              return;
             await play(page);
             await playback(page, "audio");
             const media = page.locator("#movie_player video").first();
@@ -184,11 +185,11 @@ for (const host of hosts) {
   void test(
     `${host} SponsorBlock can skip through the end of a real playlist, then follow native Next in the same page`,
     { timeout: 110000, skip: guestPlaybackSkip(host) },
-    async () => {
+    async (t) => {
       const range = await sponsorRange(tailVideo, "outro");
       const list = tailPlaylist;
       await withSponsor(host, 2, "outro", async (page) => {
-        await openYouTube(page, host, `/playlist?list=${list}`);
+        if (!(await openYouTube(page, host, `/playlist?list=${list}`, t))) return;
         await page
           .locator(`a[href*="v=${tailVideo}"][href*="list=${list}"]:visible`)
           .first()
