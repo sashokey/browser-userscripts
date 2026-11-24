@@ -384,6 +384,25 @@ void test("enabling audio preserves native transport payload descriptors", () =>
   );
 });
 
+void test("Audio only leaves receiver-sensitive player variables on their original object", () => {
+  const identities = new WeakMap<object, string>();
+  const args: NativeArgs = {
+    get video_id() {
+      return identities.get(this) ?? "";
+    },
+  };
+  identities.set(args, videoId);
+  const player = {
+    loadVideoByPlayerVars(vars: NativeArgs) {
+      return vars.video_id;
+    },
+  };
+  const application = { create: () => player };
+  install(application);
+  application.create();
+  assert.equal(player.loadVideoByPlayerVars(args), videoId);
+});
+
 function nativePlayer() {
   return {
     preloadVideoByPlayerVars(args: NativeArgs): boolean | undefined {
@@ -465,12 +484,12 @@ void test("a long-lived player can restore video from older preloads with bounde
   application.create(second);
   for (let index = 0; index < count; index++) {
     const id = `stress${String(index).padStart(5, "0")}`;
-    assert.equal(first.preloadVideoByPlayerVars({ video_id: id }), true);
+    first.preloadVideoByPlayerVars({ video_id: id });
   }
+  assert.equal(first.loadVideoByPlayerVars({ video_id: "stress08191" }), true);
   disableAudio();
   assert.equal(first.cueVideoByPlayerVars({ video_id: "stress00000" }), false);
   assert.equal(first.loadVideoByPlayerVars({ video_id: "stress00000" }), false);
-  assert.equal(first.loadVideoByPlayerVars({ video_id: "stress08191" }), false);
   assert.equal(
     second.loadVideoByPlayerVars({ video_id: "stress00000" }),
     undefined,
@@ -538,6 +557,79 @@ void test("tracking does not read native preload accessors ahead of the player",
   assert.deepEqual([idReads, modeReads], [1, 1]);
 });
 
+void test("an opaque native ID preserves an explicit audio preload for a tracked video", () => {
+  const player = nativePlayer();
+  const application = { create: () => player };
+  const disableAudio = install(application);
+  application.create();
+  player.preloadVideoByPlayerVars({ video_id: videoId });
+  disableAudio();
+  let reads = 0;
+  const args = {
+    get video_id() {
+      reads++;
+      return videoId;
+    },
+    audio_only: true,
+  };
+  player.preloadVideoByPlayerVars = (vars) => {
+    assert.equal(vars.video_id, videoId);
+    assert.equal(vars, args);
+    return vars.audio_only;
+  };
+  const descriptor = Object.getOwnPropertyDescriptor(args, "video_id");
+  assert.equal(player.preloadVideoByPlayerVars(args), true);
+  assert.equal(reads, 1);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(args, "video_id"), descriptor);
+  assert.equal(player.loadVideoByPlayerVars({ video_id: videoId }), undefined);
+});
+
+void test("a false native mode getter does not discard tracking of an audio preload", () => {
+  const player = nativePlayer();
+  const application = { create: () => player };
+  const disableAudio = install(application);
+  application.create();
+  player.preloadVideoByPlayerVars({ video_id: videoId });
+  disableAudio();
+  assert.equal(
+    player.preloadVideoByPlayerVars({
+      video_id: videoId,
+      get audio_only() {
+        return false;
+      },
+    }),
+    false,
+  );
+  assert.equal(player.loadVideoByPlayerVars({ video_id: videoId }), false);
+});
+
+void test("opaque native preloads do not trap later videos in audio mode", () => {
+  const preloads = new Map<string, boolean>();
+  const player = {
+    preloadVideoByPlayerVars(args: NativeArgs) {
+      if (!preloads.has(args.video_id))
+        preloads.set(args.video_id, args.audio_only === true);
+    },
+    loadVideoByPlayerVars(args: NativeArgs) {
+      return args.audio_only ?? preloads.get(args.video_id);
+    },
+  };
+  const application = { create: () => player };
+  const disableAudio = install(application);
+  application.create();
+  player.preloadVideoByPlayerVars({
+    get video_id() {
+      return videoId;
+    },
+    audio_only: true,
+  });
+  player.preloadVideoByPlayerVars({ video_id: "next-video" });
+  assert.equal(player.loadVideoByPlayerVars({ video_id: "next-video" }), true);
+  disableAudio();
+  assert.equal(player.loadVideoByPlayerVars({ video_id: "next-video" }), false);
+  assert.equal(player.loadVideoByPlayerVars({ video_id: videoId }), true);
+});
+
 void test("saturating forced preload tracking preserves an unrelated native audio preload", () => {
   const preloads = new Map<string, boolean>();
   const player = {
@@ -586,6 +678,7 @@ for (const accessor of ["audio_only", "video_id"] as const) {
     disableAudio();
     assert.equal(player.loadVideoByPlayerVars({ video_id: videoId }), true);
     assert.equal(player.loadVideoByPlayerVars({ video_id: "forced-0" }), false);
+    assert.equal(player.loadVideoByPlayerVars({ video_id: "forced-511" }), false);
   });
 }
 

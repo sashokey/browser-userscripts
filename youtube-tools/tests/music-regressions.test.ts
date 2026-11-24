@@ -132,11 +132,11 @@ function openMusic(
         if (callback === this.callback) observations.delete(target);
     }
   }
-  const window = {
+  const window = new (class extends EventTarget {
     get top() {
-      return window;
-    },
-  };
+      return this;
+    }
+  })();
   class Video extends EventTarget {
     paused = false;
     readonly player: object;
@@ -161,6 +161,9 @@ function openMusic(
     querySelector: (selector: string) =>
       selector === "ytmusic-player-bar" ? { repeatMode } : active,
     documentElement: {
+      hasAttribute(name: string) {
+        return name === "data-youtube-tools-blocked" && blocked;
+      },
       toggleAttribute(name: string, value: boolean) {
         if (name === "data-youtube-tools-blocked") blocked = value;
       },
@@ -174,7 +177,9 @@ function openMusic(
     GM_addStyle() {},
     MutationObserver: Observer,
     HTMLVideoElement: Video,
+    AbortController,
     queueMicrotask,
+    URL,
     URLSearchParams,
     ...timers,
   });
@@ -183,6 +188,8 @@ function openMusic(
     navigate: (next: string) => {
       location.href = new URL(next, location).href;
     },
+    finishNavigation: () =>
+      document.dispatchEvent(new Event("yt-navigate-finish")),
     update: () => observations.get(active)?.([]),
     detach: () => {
       active.isConnected = false;
@@ -215,6 +222,349 @@ void test("the DOM play fallback skips a clip using the actual queue player API"
   assert.equal(video.paused, true);
   await nextTurn();
   assert.deepEqual(app.selections, [2]);
+});
+
+void test("a mix starts its selected song after the native queue fills", async () => {
+  const list = "RD-start";
+  const rows: QueueRow[] = [];
+  const app = application(rows);
+  let notify: (() => void) | undefined;
+  Object.assign(app.root.queue, {
+    store: {
+      subscribe(listener: () => void) {
+        notify = listener;
+        return () => {
+          notify = undefined;
+        };
+      },
+    },
+  });
+  const requests: unknown[] = [];
+  app.playerApi.loadVideoByPlayerVars = (request) => requests.push(request);
+  const page = openMusic(app, `/playlist?list=${list}`);
+  const request = { video_id: songId, playlist_id: list, start: 12 };
+  app.playerApi.loadVideoByPlayerVars(request);
+  assert.deepEqual(requests, []);
+  assert.equal(page.blocked(), true);
+
+  page.navigate(`/watch?v=${songId}&list=${list}`);
+  rows.push(item(songId, song, false, list), item(clipId, clip, false, list));
+  notify?.();
+  await nextTurn();
+  assert.deepEqual(requests, [request]);
+  assert.equal(page.blocked(), false);
+  assert.equal(notify, undefined);
+  page.update();
+  assert.deepEqual(requests, [request]);
+});
+
+void test("a deferred mix start is discarded on navigation to another playlist", async () => {
+  const rows: QueueRow[] = [];
+  const app = application(rows);
+  const page = openMusic(app, "/playlist?list=RD-old");
+  const request = { video_id: songId, playlist_id: "RD-old" };
+  app.playerApi.loadVideoByPlayerVars(request);
+
+  page.navigate(`/watch?v=${songId}&list=RD-new`);
+  page.update();
+  rows.push(item(songId, song, false, "RD-old"));
+  page.navigate(`/watch?v=${songId}&list=RD-old`);
+  page.update();
+  await nextTurn();
+  assert.deepEqual(app.calls, []);
+});
+
+void test("a deferred mix start skips a newly identified clip", async () => {
+  const list = "RD-start";
+  const rows: QueueRow[] = [];
+  const app = application(rows);
+  const page = openMusic(app, `/playlist?list=${list}`);
+  const request = { video_id: clipId, playlist_id: list };
+  app.playerApi.loadVideoByPlayerVars(request);
+
+  page.navigate(`/watch?v=${clipId}&list=${list}`);
+  rows.push(item(clipId, clip, false, list), item(songId, song, false, list));
+  page.update();
+  await nextTurn();
+  assert.deepEqual(app.calls, []);
+  assert.deepEqual(app.selections, [1]);
+});
+
+void test("a mix waits for the type of an already selected row", async () => {
+  const list = "RD-start";
+  const rows = [item(songId, undefined, false, list), item("next-song", song)];
+  const app = application(rows);
+  const page = openMusic(app, `/playlist?list=${list}`);
+  const request = { video_id: songId, playlist_id: list };
+  app.playerApi.loadVideoByPlayerVars(request);
+  await nextTurn();
+  assert.deepEqual(app.selections, []);
+
+  page.navigate(`/watch?v=${songId}&list=${list}`);
+  rows[0] = item(songId, song, false, list);
+  page.update();
+  assert.deepEqual(app.calls, [songId]);
+});
+
+void test("a pending mix start uses the current native load method", () => {
+  const list = "RD-start";
+  const rows: QueueRow[] = [];
+  const app = application(rows);
+  const page = openMusic(app, `/playlist?list=${list}`);
+  const request = { video_id: songId, playlist_id: list };
+  app.playerApi.loadVideoByPlayerVars(request);
+  app.playerApi.loadVideoByPlayerVars = (params) =>
+    app.calls.push(`replacement:${params.video_id}`);
+
+  page.navigate(`/watch?v=${songId}&list=${list}`);
+  rows.push(item(songId, song, false, list));
+  page.update();
+  assert.deepEqual(app.calls, [`replacement:${songId}`]);
+});
+
+void test("playlist navigation resumes a load when the queue was ready first", () => {
+  const list = "RD-start";
+  const rows: QueueRow[] = [];
+  const app = application(rows);
+  const page = openMusic(app, `/playlist?list=${list}`);
+  const request = { video_id: songId, playlist_id: list };
+  app.playerApi.loadVideoByPlayerVars(request);
+  rows.push(item(songId, song, false, list));
+  page.update();
+  assert.deepEqual(app.calls, []);
+
+  page.navigate(`/watch?v=${songId}&list=${list}`);
+  page.finishNavigation();
+  assert.deepEqual(app.calls, [songId]);
+});
+
+void test("a direct song starts when its metadata arrives in the queue", () => {
+  const rows: QueueRow[] = [];
+  const app = application(rows);
+  const page = openMusic(app, `/watch?v=${songId}`);
+  app.playerApi.loadVideoByPlayerVars({ video_id: songId });
+  assert.deepEqual(app.calls, []);
+
+  rows.push(item(songId, song));
+  page.update();
+  assert.deepEqual(app.calls, [songId]);
+  assert.equal(app.pauses(), 0);
+});
+
+void test("a song launched on Home can wait for its direct watch route", () => {
+  const rows: QueueRow[] = [];
+  const app = application(rows);
+  const page = openMusic(app, "/");
+  app.playerApi.loadVideoByPlayerVars({ video_id: songId });
+  rows.push(item(songId, song));
+  page.navigate(`/watch?v=${songId}`);
+  page.finishNavigation();
+  assert.deepEqual(app.calls, [songId]);
+});
+
+void test("a mix can get its playlist ID only from the selected queue row", () => {
+  const list = "RD-start";
+  const rows: QueueRow[] = [];
+  const app = application(rows);
+  const page = openMusic(app, "/");
+  const request = { video_id: songId, playlist_id: list };
+  app.playerApi.loadVideoByPlayerVars(request);
+  rows.push(item(songId, song, false, list));
+  page.navigate(`/watch?v=${songId}`);
+  page.finishNavigation();
+  assert.deepEqual(app.calls, [songId]);
+});
+
+for (const entry of ["/", "/watch?v=old-song&list=RD-old"]) {
+  for (const first of ["song", "clip"] as const) {
+    void test(`a mix from ${entry} resolves the omitted playlist ID for its first ${first}`, async () => {
+      const list = "RD-start";
+      const rows: QueueRow[] = [];
+      const app = application(rows);
+      const page = openMusic(app, entry);
+      const target = first === "song" ? songId : clipId;
+      app.playerApi.loadVideoByPlayerVars({ video_id: target });
+      rows.push(item(target, first === "song" ? song : clip, false, list));
+      rows.push(item("next-song", song, false, list));
+      page.navigate(`/watch?v=${target}&list=${list}`);
+      page.finishNavigation();
+      await nextTurn();
+      assert.deepEqual(app.calls, first === "song" ? [songId] : []);
+      assert.deepEqual(app.selections, first === "clip" ? [1] : []);
+    });
+  }
+}
+
+void test("a pending load keeps the playlist ID from its initial playlist page", async () => {
+  const list = "RD-start";
+  const rows: QueueRow[] = [];
+  const app = application(rows);
+  const page = openMusic(app, `/playlist?list=${list}`);
+  app.playerApi.loadVideoByPlayerVars({ video_id: clipId });
+  page.navigate(`/watch?v=${clipId}`);
+  rows.push(item(clipId, clip, false, list), item(songId, song, false, list));
+  page.finishNavigation();
+  await nextTurn();
+  assert.deepEqual(app.selections, [1]);
+  assert.equal(app.pauses(), 0);
+});
+
+void test("a deferred song never sends a mutated video ID to the player", () => {
+  const list = "RD-start";
+  const rows: QueueRow[] = [];
+  const app = application(rows);
+  const page = openMusic(app, `/playlist?list=${list}`);
+  const request = { video_id: songId, playlist_id: list };
+  app.playerApi.loadVideoByPlayerVars(request);
+  request.video_id = clipId;
+  page.navigate(`/watch?v=${songId}&list=${list}`);
+  rows.push(item(songId, song, false, list), item(clipId, clip, false, list));
+  page.finishNavigation();
+  assert.deepEqual(app.calls, []);
+});
+
+for (const entry of ["/", "/playlist?list=RD-start"]) {
+  void test(`a queued clip is skipped when mix startup from ${entry} commits a listless watch`, async () => {
+    const list = "RD-start";
+    const app = application([
+      item(clipId, clip, false, list),
+      item(songId, song, false, list),
+    ]);
+    const page = openMusic(app, entry);
+    const request = { video_id: clipId, playlist_id: list };
+    app.playerApi.loadVideoByPlayerVars(request);
+    page.navigate(`/watch?v=${clipId}`);
+    await nextTurn();
+    assert.deepEqual(app.selections, [1]);
+    assert.equal(app.pauses(), 0);
+  });
+}
+
+for (const home of [true, false]) {
+  void test(`cancelling a deferred start on ${home ? "Home" : "the previous watch"} reveals the audio still loaded`, () => {
+    const list = "RD-before";
+    const route = `/watch?v=${songId}&list=${list}`;
+    const app = application([item(songId, song, false, list)]);
+    const page = openMusic(app, route);
+    app.playerApi.loadVideoByPlayerVars({ video_id: songId });
+    app.setLoaded(songId);
+
+    page.navigate("/watch?v=next-track&list=RD-next");
+    const request = { video_id: "next-track", playlist_id: "RD-next" };
+    app.playerApi.loadVideoByPlayerVars(request);
+    assert.equal(page.blocked(), true);
+
+    page.navigate(home ? "/" : route);
+    page.finishNavigation();
+    assert.deepEqual(app.calls, [songId]);
+    assert.equal(page.blocked(), false);
+  });
+}
+
+void test("a new direct song waits when load precedes navigation from another song", () => {
+  const next = "next-song";
+  const rows = [item(songId, song)];
+  const app = application(rows);
+  const page = openMusic(app, `/watch?v=${songId}`);
+  app.playerApi.loadVideoByPlayerVars({ video_id: songId });
+  app.playerApi.loadVideoByPlayerVars({ video_id: next });
+  rows.splice(0, rows.length, item(next, song));
+  page.navigate(`/watch?v=${next}`);
+  page.finishNavigation();
+  assert.deepEqual(app.calls, [songId, next]);
+});
+
+void test("a pending load rehooks a native method redefined before navigation", () => {
+  const list = "RD-start";
+  const rows: QueueRow[] = [];
+  const app = application(rows);
+  const page = openMusic(app, `/playlist?list=${list}`);
+  const request = { video_id: songId, playlist_id: list };
+  app.playerApi.loadVideoByPlayerVars(request);
+  Object.defineProperty(app.playerApi, "loadVideoByPlayerVars", {
+    configurable: true,
+    writable: true,
+    value({ video_id }: { video_id: string }) {
+      app.calls.push(`redefined:${video_id}`);
+    },
+  });
+  rows.push(item(songId, song, false, list));
+  page.navigate(`/watch?v=${songId}&list=${list}`);
+  page.finishNavigation();
+  assert.deepEqual(app.calls, [`redefined:${songId}`]);
+});
+
+void test("a pending clip skip stops when another playlist page opens", async () => {
+  const app = application([
+    item(clipId, clip, false, "PL-old"),
+    item(songId, song),
+  ]);
+  const page = openMusic(app, `/watch?v=${clipId}&list=PL-old`);
+  app.playerApi.loadVideoByPlayerVars({ video_id: clipId });
+  page.navigate("/playlist?list=PL-new");
+  await nextTurn();
+  assert.deepEqual(app.selections, []);
+});
+
+void test("a clip shared by two playlists is skipped in the requested queue", async () => {
+  const rows = [item(clipId, clip, false, "PL-old"), item(songId, song)];
+  const app = application(rows);
+  const page = openMusic(app, "/playlist?list=PL-new");
+  const request = { video_id: clipId, playlist_id: "PL-new" };
+  app.playerApi.loadVideoByPlayerVars(request);
+  await nextTurn();
+  assert.deepEqual(app.selections, []);
+
+  rows.splice(
+    0,
+    rows.length,
+    item(clipId, clip, false, "PL-new"),
+    item("new-song", song),
+  );
+  page.navigate(`/watch?v=${clipId}&list=PL-new`);
+  page.update();
+  await nextTurn();
+  assert.deepEqual(app.calls, []);
+  assert.deepEqual(app.selections, [1]);
+});
+
+void test("an old listless row cannot claim an explicit new playlist load", async () => {
+  const list = "PL-new";
+  const rows = [item(clipId, clip), item(songId, song)];
+  const app = application(rows);
+  const page = openMusic(app, `/playlist?list=${list}`);
+  const request = { video_id: clipId, playlist_id: list };
+  app.playerApi.loadVideoByPlayerVars(request);
+  await nextTurn();
+  assert.deepEqual(app.selections, []);
+
+  rows.splice(
+    0,
+    rows.length,
+    item(clipId, clip, false, list),
+    item("new-song", song),
+  );
+  page.navigate(`/watch?v=${clipId}`);
+  page.finishNavigation();
+  await nextTurn();
+  assert.deepEqual(app.calls, []);
+  assert.deepEqual(app.selections, [1]);
+});
+
+void test("an old pending skip does not select from a newly populated playlist", async () => {
+  const rows = [item(clipId, clip, false, "PL-old"), item(songId, song)];
+  const app = application(rows);
+  openMusic(app, `/watch?v=${clipId}&list=PL-old`);
+  const request = { video_id: clipId, playlist_id: "PL-old" };
+  app.playerApi.loadVideoByPlayerVars(request);
+  rows.splice(
+    0,
+    rows.length,
+    item(clipId, clip, false, "PL-new"),
+    item("new-song", song, false, "PL-new"),
+  );
+  await nextTurn();
+  assert.deepEqual(app.selections, []);
 });
 
 void test("a first-item skip is cancelled when navigation switches to another playlist", async () => {
@@ -554,6 +904,23 @@ function openRecommendations(feed: ReturnType<typeof recommendations>) {
   return page;
 }
 
+void test("leaving a playlist cancels continuation even if its watch route comes back", async () => {
+  const feed = recommendations();
+  const page = openRecommendations(feed);
+  feed.requestVideo();
+  await nextTurn();
+  assert.deepEqual(feed.requests, ["first"]);
+
+  page.navigate("/playlist?list=RDTM-other");
+  page.finishNavigation();
+  page.navigate(`/watch?v=${songId}&list=RDTM-recommendations`);
+  page.finishNavigation();
+  feed.finish([item("late-song", song)]);
+  await nextTurn();
+  assert.deepEqual(feed.app.selections, []);
+  assert.equal(feed.queue.getCurrentItemIndex(), 0);
+});
+
 void test("a confirmed DOM clip at the finite edge restores the previous song and player bar", async () => {
   const feed = recommendations("", false);
   const rows = feed.queue.getItems();
@@ -871,12 +1238,15 @@ void test("a direct clip opened before a queued skip cannot resume the old playl
   ]);
   const page = openMusic(app, `/watch?v=${songId}&list=PL-finite`);
   app.playerApi.loadVideoByPlayerVars({ video_id: songId });
+  app.setLoaded(songId);
   app.select(1);
   app.playerApi.loadVideoByPlayerVars({ video_id: clipId });
   page.navigate(`/watch?v=${clipId}`);
+  page.finishNavigation();
   await nextTurn();
   assert.deepEqual(app.selections, []);
   assert.equal(page.blocked(), true);
+  assert.equal(app.pauses(), 1);
 });
 
 void test("preparing a clip does not select a song or interrupt Next", async () => {
@@ -1110,6 +1480,77 @@ void test("an explicit clip opened within the same Music app does not advance it
   assert.deepEqual(app.selections, []);
   assert.equal(page.blocked(), true);
   assert.equal(app.pauses(), 1);
+});
+
+void test("opening a direct watch pauses the displaced song before queue metadata arrives", () => {
+  const app = application([item(songId, song)]);
+  const page = openMusic(app, `/watch?v=${songId}&list=RD-before`);
+  app.playerApi.loadVideoByPlayerVars({ video_id: songId });
+  app.setLoaded(songId);
+  page.navigate(`/watch?v=${clipId}`);
+  app.playerApi.loadVideoByPlayerVars({ video_id: clipId });
+  const pauses = app.pauses();
+  page.navigate("/");
+  page.finishNavigation();
+  assert.equal(pauses, 1);
+  assert.deepEqual(app.calls, [songId]);
+});
+
+void test("Play on an opened direct clip cannot resume the previous song", () => {
+  const app = application([item(songId, song), item(clipId, clip)]);
+  const page = openMusic(app, `/watch?v=${songId}&list=RD-before`);
+  app.playerApi.loadVideoByPlayerVars({ video_id: songId });
+  app.setLoaded(songId);
+  app.select(1);
+  page.navigate(`/watch?v=${clipId}`);
+  app.playerApi.loadVideoByPlayerVars({ video_id: clipId });
+  app.playerApi.playVideo();
+  assert.equal(page.playFromDom(songId, song).paused, true);
+  assert.deepEqual(app.calls, [songId]);
+  assert.equal(page.blocked(), true);
+});
+
+for (const source of ["native video", "player response", "DOM event"] as const) {
+  void test(`a direct song cannot unblock stale clip media identified by ${source}`, () => {
+    const response =
+      source === "player response"
+        ? { videoDetails: { videoId: clipId, musicVideoType: clip } }
+        : undefined;
+    const app = application([item(clipId, clip), item(songId, song)], response);
+    const page = openMusic(app);
+    if (source === "native video") app.setLoaded(clipId);
+    app.playerApi.loadVideoByPlayerVars({ video_id: clipId });
+
+    app.select(1);
+    page.navigate(`/watch?v=${songId}`);
+    page.finishNavigation();
+    if (source === "DOM event")
+      assert.equal(page.playFromDom(clipId, clip).paused, true);
+    else app.playerApi.playVideo();
+    assert.deepEqual(app.calls, []);
+    assert.equal(page.blocked(), true);
+
+    app.setLoaded(songId);
+    if (response)
+      response.videoDetails = { videoId: songId, musicVideoType: song };
+    app.playerApi.playVideo();
+    assert.deepEqual(app.calls, ["play"]);
+    assert.equal(page.blocked(), false);
+  });
+}
+
+void test("leaving a direct clip restores the mini-player for the loaded song", () => {
+  const app = application([item(songId, song), item(clipId, clip)]);
+  const page = openMusic(app, `/watch?v=${songId}&list=RD-before`);
+  app.playerApi.loadVideoByPlayerVars({ video_id: songId });
+  app.setLoaded(songId);
+  app.select(1);
+  page.navigate(`/watch?v=${clipId}`);
+  app.playerApi.loadVideoByPlayerVars({ video_id: clipId });
+  assert.equal(page.blocked(), true);
+  page.navigate("/");
+  page.finishNavigation();
+  assert.equal(page.blocked(), false);
 });
 
 void test("a bookmarked queue item cannot override verified clip metadata", () => {

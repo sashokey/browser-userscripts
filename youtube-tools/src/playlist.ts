@@ -336,7 +336,8 @@ function preventNativeAdvance(manager: Element): Suppression | undefined {
       );
     },
     restore() {
-      if (observed && ownsMethod()) {
+      if (!ownsMethod()) return;
+      if (observed) {
         if (original)
           Reflect.defineProperty(native, method, { ...original, value: raw });
         else {

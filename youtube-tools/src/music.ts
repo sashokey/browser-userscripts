@@ -1,4 +1,4 @@
-import { observeAppTree, read } from "./dom.ts";
+import { navigation, observeAppTree, read } from "./dom.ts";
 import { libraryItem, libraryMutation, musicLibrary } from "./music-library.ts";
 import { musicLyrics } from "./music-lyrics.ts";
 
@@ -19,7 +19,7 @@ const playbackMethods = [
   "playVideo",
 ] as const;
 type PlaybackMethod = (typeof playbackMethods)[number];
-const continuationTimeout = 8000;
+const queueTimeout = 8000;
 
 type Track = { id: string; allowed: boolean | undefined };
 type Selection = { id: string; index: number; item: unknown; list?: string };
@@ -36,12 +36,19 @@ type Pending = {
   previous?: string;
   origin?: Selection;
   list?: string;
+  requestedList?: string;
   initialUrl: string;
   refill?: Refill;
   recoverClip?: boolean;
   step: 1 | -1;
 };
-type Guard = { owner: object; wrapper: unknown; get?: () => unknown };
+type Guard = {
+  owner: object;
+  original: unknown;
+  wrapper: unknown;
+  get?: () => unknown;
+};
+type Load = { list: string | undefined; replay?: () => void };
 
 function ownProperty(
   owner: object,
@@ -95,6 +102,18 @@ function invoke(owner: unknown, key: string, ...args: unknown[]): unknown {
 
 function id(value: unknown): string | undefined {
   if (typeof value === "string" && value.length > 0) return value;
+}
+
+function videoArgument(value: unknown): string | undefined {
+  return id(read(value, "video_id")) ?? id(read(value, "videoId"));
+}
+
+function playlistArgument(value: unknown): string | undefined {
+  return (
+    id(read(value, "playlist_id")) ??
+    id(read(value, "playlistId")) ??
+    id(read(value, "list"))
+  );
 }
 
 function savedTrack(data: unknown): boolean {
@@ -202,18 +221,51 @@ function watchId(): string | undefined {
     return id(new URLSearchParams(location.search).get("v"));
 }
 
-function watchList(): string | undefined {
-  if (location.pathname === "/watch")
+function currentList(): string | undefined {
+  if (location.pathname === "/watch" || location.pathname === "/playlist")
     return id(new URLSearchParams(location.search).get("list"));
+}
+
+function watchList(): string | undefined {
+  if (location.pathname === "/watch") return currentList();
+}
+
+function playbackVideo(player: unknown): string | null | undefined {
+  const playing = id(read(invoke(player, "getVideoData"), "video_id"));
+  const direct =
+    document.documentElement?.hasAttribute(blocked) && !watchList()
+      ? watchId()
+      : undefined;
+  if (!direct) return playing;
+  if (playing && playing !== direct) return null;
+  const response = id(
+    read(invoke(player, "getPlayerResponse"), "videoDetails", "videoId"),
+  );
+  return response && response !== direct ? null : direct;
+}
+
+function matchesListlessStart(request: Pending): boolean {
+  const list = request.list;
+  if (!list || watchId() !== request.id || watchList()) return false;
+  const from = new URL(request.initialUrl);
+  const fromList = from.searchParams.get("list");
+  return (
+    ((from.pathname === "/playlist" && fromList === list) ||
+      (request.requestedList === list &&
+        (from.pathname !== "/watch" || fromList !== list))) &&
+    queueList(items(request.queue)[currentIndex(request.queue)]) === list
+  );
 }
 
 function matchesWatch(request: Pending): boolean {
   const video = watchId();
+  const list = currentList();
   return (
     location.href === request.initialUrl ||
-    video === undefined ||
-    (watchList() === request.list &&
-      (video === request.origin?.id || video === request.id))
+    (video === undefined
+      ? !list || list === request.list
+      : list === request.list &&
+        (video === request.origin?.id || video === request.id))
   );
 }
 
@@ -247,11 +299,13 @@ export function music(): void {
     if (!route || !playing || route === playing) return route ?? playing;
   }, () => id(invoke(read(unsafeWindow, "ytcfg"), "get", "INNERTUBE_CLIENT_VERSION")));
   let app: Element | null = null;
+  let appLifetime: AbortController | undefined;
   let queue: object | undefined;
   let currentPlayer: object | undefined;
   let previous: Selection | undefined;
   let prior: Selection | undefined;
   let pending: Pending | undefined;
+  let deferredLoad: { retry: () => void; cancel: () => void } | undefined;
   let preservingPlayer: object | undefined;
   let mediaRestore: { request: Pending; song: string } | undefined;
   let completed:
@@ -282,6 +336,114 @@ export function music(): void {
   function stopPending(): void {
     if (pending?.refill) clearTimeout(pending.refill.timeout);
     pending = undefined;
+  }
+
+  function stopDeferredLoad(): void {
+    const current = deferredLoad;
+    deferredLoad = undefined;
+    current?.cancel();
+  }
+
+  function restorePlayback(): void {
+    if (
+      !document.documentElement?.hasAttribute(blocked) ||
+      !queue ||
+      !currentPlayer ||
+      !stillActive(queue, currentPlayer)
+    )
+      return;
+    const watching = watchId();
+    const playing = id(read(invoke(currentPlayer, "getVideoData"), "video_id"));
+    if (!playing || (watching && watching !== playing)) return;
+    const confirmed = confirmedTracks.get(playing) ?? playerTrack(currentPlayer, playing);
+    if (confirmed ?? previous?.id === playing) block(false);
+  }
+
+  function deferLoad(
+    owner: object,
+    player: object,
+    target: string,
+    load: Load,
+  ): boolean {
+    if (!load.replay) return false;
+    const list = load.list ?? currentList();
+    const replay = load.replay;
+    const initialUrl = location.href;
+    let pausedPrevious = false;
+    let committedList: string | undefined;
+    const retry = () => resume(false);
+    function pauseDisplacedSong(): void {
+      if (pausedPrevious || load.list || watchList() || watchId() !== target)
+        return;
+      const playing = id(read(invoke(player, "getVideoData"), "video_id"));
+      if (!playing || playing === target) return;
+      pausedPrevious = true;
+      invoke(player, "pauseVideo");
+    }
+    function discard(): void {
+      stopDeferredLoad();
+      restorePlayback();
+    }
+    function resume(expired: boolean): void {
+      if (deferredLoad?.retry !== retry) return;
+      const routeList = watchList();
+      const onTarget =
+        watchId() === target &&
+        (committedList
+          ? routeList === committedList
+          : !load.list || !routeList || routeList === load.list);
+      const opening =
+        location.pathname === "/playlist" && !!list && currentList() === list;
+      if (
+        !stillActive(owner, player) ||
+        (!onTarget &&
+          !opening &&
+          (committedList !== undefined || location.href !== initialUrl))
+      ) {
+        discard();
+        return;
+      }
+      if (onTarget) {
+        committedList ??= routeList;
+        pauseDisplacedSong();
+        const row = items(owner)[currentIndex(owner)];
+        const track = queueTrack(row);
+        const rowList = queueList(row);
+        const expectedList = load.list ?? routeList;
+        if (
+          track?.id === target &&
+          (!expectedList ||
+            rowList === expectedList ||
+            (!rowList && routeList === expectedList && list === expectedList)) &&
+          (expired ||
+            track.allowed !== undefined ||
+            confirmedTracks.has(target) ||
+            playerTrack(player, target) !== undefined)
+        ) {
+          stopDeferredLoad();
+          replay();
+          return;
+        }
+      }
+      if (expired) discard();
+    }
+    const timeout = setTimeout(() => resume(true), queueTimeout);
+    const unsubscribe = invoke(read(owner, "store"), "subscribe", () =>
+      queueMicrotask(retry),
+    );
+    deferredLoad = {
+      retry,
+      cancel() {
+        clearTimeout(timeout);
+        if (typeof unsubscribe === "function") {
+          try {
+            Reflect.apply(unsubscribe, undefined, []);
+          } catch {}
+        }
+      },
+    };
+    pauseDisplacedSong();
+    return true;
   }
 
   function stopDirectClip(player: object, target: string): boolean {
@@ -393,7 +555,7 @@ export function music(): void {
       request: undefined,
       timeout: setTimeout(() => {
         if (pending === request) stopPending();
-      }, continuationTimeout),
+      }, queueTimeout),
     });
     if (refill.request === native) return;
     refill.request = native;
@@ -420,8 +582,14 @@ export function music(): void {
       stopPending();
       return;
     }
-    if (stopDirectClip(request.player, request.id)) return;
-    if (!matchesWatch(request)) {
+    const listlessStart = matchesListlessStart(request);
+    if (
+      !listlessStart &&
+      (!request.list || location.href !== request.initialUrl) &&
+      stopDirectClip(request.player, request.id)
+    )
+      return;
+    if (!listlessStart && !matchesWatch(request)) {
       stopPending();
       return;
     }
@@ -447,6 +615,11 @@ export function music(): void {
       if (request.refill) stopPending();
       return;
     }
+    const rejectedList = queueList(rows[rejected]);
+    if (request.list && rejectedList && request.list !== rejectedList) {
+      stopPending();
+      return;
+    }
     const repeat = repeatAll();
     if (!request.refill && rejected !== request.index) {
       request.index = rejected;
@@ -464,14 +637,16 @@ export function music(): void {
       const index = (next + rows.length) % rows.length;
       const item = rows[index];
       const candidate = queueTrack(item);
+      const candidateList = queueList(item);
       if (
         !candidate ||
+        (request.list && candidateList && request.list !== candidateList) ||
         !(
           confirmedTracks.get(candidate.id) ??
           allowsQueueTrack(
             candidate,
             index,
-            queueList(item) ?? routeList,
+            candidateList ?? routeList,
             request.origin,
           )
         )
@@ -492,16 +667,26 @@ export function music(): void {
     target: string,
     method: PlaybackMethod,
     verified?: boolean,
+    load?: Load,
   ): boolean {
     const rows = items(owner);
     const current = currentIndex(owner);
     const selected = queueTrack(rows[current]);
-    const next =
-      selected?.id === target
-        ? current
-        : rows.findIndex((item) => queueTrack(item)?.id === target);
+    const requestList = load?.list;
+    const matchesTarget = (row: unknown) => {
+      if (queueTrack(row)?.id !== target) return false;
+      const list = queueList(row);
+      return (
+        !requestList ||
+        requestList === list ||
+        (!list && watchId() === target && watchList() === requestList)
+      );
+    };
+    const next = matchesTarget(rows[current])
+      ? current
+      : rows.findIndex(matchesTarget);
     const result = queueTrack(rows[next]);
-    const routeList = queueList(rows[next]) ?? watchList();
+    const routeList = requestList ?? queueList(rows[next]) ?? watchList();
     const confirmed = verified ?? playerTrack(player, target);
     if (confirmed !== undefined && confirmedTracks.get(target) !== confirmed) {
       confirmedTracks.set(target, confirmed);
@@ -511,9 +696,8 @@ export function music(): void {
           root.querySelectorAll(musicRows).forEach(update);
       });
     }
-    const allowed =
-      confirmedTracks.get(target) ??
-      allowsQueueTrack(result, next, routeList, previous);
+    const known = confirmedTracks.get(target) ?? result?.allowed;
+    const allowed = known ?? allowsQueueTrack(result, next, routeList, previous);
     if (
       method === "enqueueVideoByPlayerVars" ||
       method === "cueVideoByPlayerVars"
@@ -540,7 +724,19 @@ export function music(): void {
       };
       return true;
     }
-    if (stopDirectClip(player, target)) return false;
+    if (known === false && !requestList && stopDirectClip(player, target))
+      return false;
+    if (
+      load?.replay &&
+      (next < 0 || known === undefined) &&
+      deferLoad(owner, player, target, load)
+    ) {
+      stopPending();
+      if (!previous || previous.id === target || watchId() === target)
+        block(true);
+      return false;
+    }
+    if (!requestList && stopDirectClip(player, target)) return false;
     if (confirmedTracks.get(target) === false && previous?.id === target) {
       previous =
         prior && confirmedTracks.get(prior.id) !== false ? prior : undefined;
@@ -598,6 +794,7 @@ export function music(): void {
       ...(selected ? { previous: selected.id } : {}),
       ...(previous ? { origin: previous } : {}),
       ...(list ? { list } : {}),
+      ...(requestList ? { requestedList: requestList } : {}),
       initialUrl: location.href,
       ...(recoverClip ? { recoverClip: true } : {}),
       step,
@@ -627,20 +824,23 @@ export function music(): void {
         continue;
       }
       if (typeof current !== "function") continue;
-      const entry: Guard = { owner, wrapper: undefined };
+      const entry: Guard = { owner, original: undefined, wrapper: undefined };
       function wrap(value: unknown): unknown {
+        entry.original = value;
         if (typeof value !== "function") return value;
         return new Proxy(value, {
           apply(method, receiver: unknown, args: unknown[]) {
             const owner = entry.owner;
             if (stillActive(owner, player)) {
+              const playing =
+                name === "playVideo" ? playbackVideo(player) : undefined;
+              if (playing === null) return;
               const target =
                 name === "playVideo"
-                  ? (id(read(invoke(player, "getVideoData"), "video_id")) ??
+                  ? (playing ??
                     queueTrack(items(owner)[currentIndex(owner)])?.id ??
                     watchId())
-                  : (id(read(args[0], "video_id")) ??
-                    id(read(args[0], "videoId")));
+                  : videoArgument(args[0]);
               if (preservingPlayer === player) {
                 const restore = mediaRestore;
                 if (
@@ -655,7 +855,34 @@ export function music(): void {
                 block(false);
                 return result;
               }
-              if (target && !allow(owner, player, target, name)) return;
+              if (name === "loadVideoByPlayerVars") {
+                stopDeferredLoad();
+                if (target) {
+                  const suppliedList = playlistArgument(args[0]);
+                  const list = suppliedList ??
+                    (location.pathname === "/playlist" ? currentList() : undefined);
+                  const replay = () => {
+                    if (
+                      videoArgument(args[0]) !== target ||
+                      playlistArgument(args[0]) !== suppliedList
+                    )
+                      return;
+                    guard(owner, player);
+                    const current = patched.get(player)?.get(name);
+                    const original = current?.original;
+                    if (
+                      typeof original === "function" &&
+                      read(player, name) === current?.wrapper &&
+                      allow(owner, player, target, name, undefined, { list })
+                    )
+                      Reflect.apply(original, receiver, args);
+                  };
+                  if (
+                    !allow(owner, player, target, name, undefined, { list, replay })
+                  )
+                    return;
+                }
+              } else if (target && !allow(owner, player, target, name)) return;
             }
             const result: unknown = Reflect.apply(method, receiver, args);
             return result;
@@ -708,8 +935,11 @@ export function music(): void {
       prior = undefined;
       completed = undefined;
       stopPending();
+      stopDeferredLoad();
     }
     if (owner && player) guard(owner, player);
+    deferredLoad?.retry();
+    restorePlayback();
   }
 
   function update(row: Element): void {
@@ -760,7 +990,12 @@ export function music(): void {
 
   function attach(): void {
     const root = document.querySelector(appSelector);
-    if (root !== app) confirmedTracks.clear();
+    if (root !== app) {
+      appLifetime?.abort();
+      appLifetime = undefined;
+      confirmedTracks.clear();
+      stopDeferredLoad();
+    }
     app = root;
     observer.disconnect();
     observeAppTree(lifecycle, app);
@@ -769,6 +1004,20 @@ export function music(): void {
     if (!app) {
       syncLibrary(null);
       return;
+    }
+    if (!appLifetime) {
+      appLifetime = new AbortController();
+      navigation(() => {
+        if (
+          pending &&
+          !matchesWatch(pending) &&
+          !matchesListlessStart(pending) &&
+          !stopDirectClip(pending.player, pending.id)
+        )
+          stopPending();
+        deferredLoad?.retry();
+        restorePlayback();
+      }, appLifetime.signal);
     }
     observer.observe(app, {
       subtree: true,
@@ -789,8 +1038,12 @@ export function music(): void {
       const player = video.closest("#movie_player");
       if (!player || player.classList.contains("ad-showing")) return;
       updateQueue();
-      const target =
-        id(read(invoke(player, "getVideoData"), "video_id")) ?? watchId();
+      const playing = playbackVideo(player);
+      if (playing === null) {
+        video.pause();
+        return;
+      }
+      const target = playing ?? watchId();
       if (!target) return;
       const verified = playerTrack(player, target);
       const allowed = queue

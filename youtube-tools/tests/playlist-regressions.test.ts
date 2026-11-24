@@ -262,6 +262,29 @@ void test("desktop honors a native false written through the replacement autopla
   assert.equal(state, false);
 });
 
+void test("desktop leaves autoplay to a native setter that replaces the interceptor", () => {
+  let state = true;
+  const native = {
+    getCanAutoAdvance() {
+      return state;
+    },
+    setCanAutoAdvance(value: boolean) {
+      state = value;
+    },
+  };
+  const page = start("www.youtube.com", playlist, { TEST_ONLY: native });
+  Object.defineProperty(native, "setCanAutoAdvance", {
+    value(value: boolean) {
+      state = value;
+    },
+    configurable: true,
+    writable: true,
+  });
+  native.setCanAutoAdvance(false);
+  page.navigate(ordinary);
+  assert.equal(state, false);
+});
+
 void test("desktop honors a native false written through an inherited autoplay accessor", () => {
   let state = true;
   const prototype = {
