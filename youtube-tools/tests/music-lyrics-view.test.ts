@@ -3,9 +3,25 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { renderLyrics } from "../src/music-lyrics-view.ts";
 
+class RowAnimation {
+  playState: AnimationPlayState = "running";
+  readonly keyframes: Keyframe[];
+  readonly options: KeyframeAnimationOptions;
+
+  constructor(keyframes: Keyframe[], options: KeyframeAnimationOptions) {
+    this.keyframes = keyframes;
+    this.options = options;
+  }
+
+  cancel(): void {
+    this.playState = "idle";
+  }
+}
+
 class Element extends EventTarget {
   readonly children: Element[] = [];
   readonly attributes = new Map<string, string>();
+  readonly animations: RowAnimation[] = [];
   readonly style = {
     paddingBlockStart: "0px",
     paddingBlockEnd: "0px",
@@ -28,6 +44,7 @@ class Element extends EventTarget {
   readyState = 4;
   ended = false;
   paused = true;
+  seeking = false;
   hidden = false;
 
   constructor(tag: string) {
@@ -36,6 +53,12 @@ class Element extends EventTarget {
   }
 
   readonly tag: string;
+
+  animate(keyframes: Keyframe[], options: KeyframeAnimationOptions): RowAnimation {
+    const animation = new RowAnimation(keyframes, options);
+    this.animations.push(animation);
+    return animation;
+  }
 
   get offsetTop(): number {
     if (!this.parent) return 0;
@@ -83,6 +106,69 @@ const lyrics = [
   { text: "Second", start: 1250, end: 2500 },
   { text: "Last", start: 5000, end: 7000 },
 ];
+
+const transitionLyrics = [
+  ...lyrics,
+  { text: "Encore", start: 7500, end: 8000 },
+];
+
+void test("stages the visible lines behind the new active line and cancels the movement on manual scroll", (context) => {
+  const { panel, video, signal, tickFrame } = fixture(context, false);
+  Reflect.apply(renderLyrics, null, [panel, video, transitionLyrics, signal]);
+  const view = panel.children[0];
+  const rows = view?.children[0]?.children;
+  assert.ok(view && rows);
+  video.currentTime = 1.2;
+  video.paused = false;
+  video.dispatchEvent(new Event("playing"));
+  video.currentTime = 1.25;
+  tickFrame();
+
+  assert.equal(rows[1]?.attributes.get("aria-current"), "true");
+  assert.equal(rows[1]?.animations.length, 0);
+  const first = rows[2]?.animations[0];
+  const second = rows[3]?.animations[0];
+  assert.ok(first && second);
+  assert.equal(first.options.duration, 340);
+  assert.equal(first.keyframes[1]?.offset, 0.45);
+  assert.equal(first.keyframes[1]?.translate, "0px 4.4px");
+  assert.equal(second.keyframes[1]?.translate, "0px 8.8px");
+  assert.equal(first.keyframes.at(-1)?.translate, "0px 0px");
+
+  view.dispatchEvent(new Event("wheel"));
+  assert.equal(first.playState, "idle");
+  assert.equal(second.playState, "idle");
+});
+
+void test("keeps the stagger out of seeks and cancels it when Reduce Motion becomes active", (context) => {
+  const { panel, video, signal, tickFrame, motionPreference } = fixture(context, false);
+  Reflect.apply(renderLyrics, null, [panel, video, transitionLyrics, signal]);
+  const rows = panel.children[0]?.children[0]?.children;
+  assert.ok(rows);
+  video.currentTime = 1.2;
+  video.paused = false;
+  video.dispatchEvent(new Event("playing"));
+  video.seeking = true;
+  video.currentTime = 1.25;
+  video.dispatchEvent(new Event("seeking"));
+  video.seeking = false;
+  video.dispatchEvent(new Event("seeked"));
+  assert.equal(rows[2]?.animations.length, 0);
+
+  video.seeking = true;
+  video.currentTime = 1.2;
+  video.dispatchEvent(new Event("seeking"));
+  video.seeking = false;
+  video.dispatchEvent(new Event("seeked"));
+  video.currentTime = 1.25;
+  tickFrame();
+  const animation = rows[2]?.animations[0];
+  assert.ok(animation);
+  motionPreference.matches = true;
+  motionPreference.dispatchEvent(new Event("change"));
+  assert.equal(animation.playState, "idle");
+  assert.equal(rows[1]?.attributes.get("aria-current"), "true");
+});
 
 void test("fills the current line continuously within its cue and recomputes on seek", (context) => {
   const { panel, video, signal, tickFrame } = fixture(context, false);
@@ -276,10 +362,11 @@ function fixture(context: TestContext, reducedMotion = true) {
   let sourceChange: (() => void) | undefined;
   let frameId = 0;
   const frames = new Map<number, FrameRequestCallback>();
+  const motionPreference = Object.assign(new EventTarget(), { matches: reducedMotion });
   const browserWindow = Object.assign(new EventTarget(), {
     setTimeout,
     clearTimeout,
-    matchMedia: () => ({ matches: reducedMotion }),
+    matchMedia: () => motionPreference,
     requestAnimationFrame: (callback: FrameRequestCallback) => {
       frames.set(++frameId, callback);
       return frameId;
@@ -292,6 +379,7 @@ function fixture(context: TestContext, reducedMotion = true) {
     document: { createElement: (tag: string) => new Element(tag) },
     window: browserWindow,
     HTMLButtonElement: Element,
+    getComputedStyle: () => ({ translate: "none" }),
     MutationObserver: class {
       constructor(callback: () => void) {
         sourceChange = callback;
@@ -317,6 +405,7 @@ function fixture(context: TestContext, reducedMotion = true) {
     panel,
     video,
     browserWindow,
+    motionPreference,
     source,
     tickFrame: () => {
       for (const [id, callback] of [...frames]) {

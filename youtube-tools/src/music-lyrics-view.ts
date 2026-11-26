@@ -16,6 +16,8 @@ const followDelay = 2000;
 const plainFollowDelay = 4000;
 const minimumInstrumentalGap = 3000;
 const transitionDuration = 360;
+const cueTransitionDuration = 340;
+const cueContinuityLimit = 120;
 
 export function styleLyrics(): void {
   GM_addStyle(`
@@ -43,9 +45,11 @@ export function styleLyrics(): void {
     .${listClass} > button {
       background:none; border:0; padding:0; font:inherit; color:inherit; text-align:start;
       min-width:0; white-space:pre-line; overflow-wrap:anywhere; cursor:pointer;
-      opacity:.45; transition:opacity 240ms ease-out
+      opacity:.45; scale:.97; transform-origin:left center;
+      transition:opacity 240ms ease-out,scale 240ms ease-in-out
     }
-    .${listClass} > [aria-current=true] { opacity:1 }
+    .${listClass} > button:dir(rtl) { transform-origin:right center }
+    .${listClass} > [aria-current=true] { opacity:1; scale:1 }
     .${listClass} > button > span { pointer-events:none }
     .${listClass} > button:focus-visible { outline:2px solid currentColor; outline-offset:4px }
     .${instrumentalClass} { justify-self:start; direction:ltr; font-variant-numeric:tabular-nums }
@@ -73,6 +77,7 @@ function followScroll(
   delay: number,
   reducedMotion: MediaQueryList,
   signal: AbortSignal,
+  onManualScroll?: () => void,
 ) {
   let resumeTimer: number | undefined;
   let frame: number | undefined;
@@ -88,20 +93,32 @@ function followScroll(
     position = viewport.scrollTop;
   }
 
-  function follow(animate: boolean): void {
-    if (resumeTimer !== undefined || (!animate && frame !== undefined)) return;
+  function follow(
+    animate: boolean,
+    startStagger?: (distance: number) => void,
+  ): void {
+    if (
+      resumeTimer !== undefined ||
+      (!animate && frame !== undefined && !reducedMotion.matches)
+    )
+      return;
     const top = destination();
     if (top === undefined) return;
     cancelMotion();
     const from = viewport.scrollTop;
-    if (!animate || reducedMotion.matches || Math.abs(from - top) < 1) {
+    const distance = top - from;
+    if (!animate || reducedMotion.matches || Math.abs(distance) < 1) {
       if (from !== top) scrollTo(top);
       return;
     }
+    const stagger =
+      startStagger && distance > 0 && distance <= viewport.clientHeight;
+    if (stagger) startStagger(distance);
+    const duration = stagger ? cueTransitionDuration : transitionDuration;
     let started: number | undefined;
     function step(now: number): void {
       started ??= now;
-      const progress = Math.min(1, (now - started) / transitionDuration);
+      const progress = Math.min(1, (now - started) / duration);
       const eased = progress * progress * (3 - 2 * progress);
       const target = destination() ?? from;
       scrollTo(from + (target - from) * eased);
@@ -118,6 +135,7 @@ function followScroll(
 
   function pause(): void {
     cancelMotion();
+    onManualScroll?.();
     window.clearTimeout(resumeTimer);
     resumeTimer = window.setTimeout(resume, delay);
   }
@@ -286,6 +304,48 @@ export function renderLyrics(
   let active: HTMLButtonElement | undefined;
   let currentCounter: HTMLElement | undefined;
   let focus: HTMLElement | undefined;
+  let previousTime: number | undefined;
+  const rowMotions = new Map<HTMLButtonElement, Animation>();
+
+  function cancelStagger(): void {
+    for (const animation of rowMotions.values()) animation.cancel();
+    rowMotions.clear();
+  }
+
+  function staggerRows(index: number, distance: number): void {
+    const offsets = new Map<
+      HTMLButtonElement,
+      { start: string; peak: number }
+    >();
+    for (const [row, animation] of rowMotions) {
+      if (animation.playState !== "running") continue;
+      const start = getComputedStyle(row).translate;
+      if (start !== "none") offsets.set(row, { start, peak: 0 });
+    }
+    cancelStagger();
+    const bottom = viewport.scrollTop + distance + viewport.clientHeight;
+    const step = Math.min(distance * 0.1, 5);
+    for (let next = index + 1; next < rows.length; next += 1) {
+      const row = rows[next];
+      if (!row || row.offsetTop >= bottom) break;
+      offsets.set(row, {
+        start: offsets.get(row)?.start ?? "0px 0px",
+        peak: step * Math.min(next - index, 4),
+      });
+    }
+    for (const [row, { start, peak }] of offsets) {
+      const animation = row.animate(
+        [
+          { translate: start, offset: 0, easing: "ease-in-out" },
+          { translate: `0px ${peak}px`, offset: 0.45, easing: "ease-in-out" },
+          { translate: "0px 0px", offset: 1 },
+        ],
+        { duration: cueTransitionDuration },
+      );
+      rowMotions.set(row, animation);
+    }
+  }
+
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   const following = followScroll(
     viewport,
@@ -298,6 +358,7 @@ export function renderLyrics(
     followDelay,
     reducedMotion,
     signal,
+    cancelStagger,
   );
 
   function update(animate: boolean, force = false): void {
@@ -306,6 +367,10 @@ export function renderLyrics(
     const line = lyrics[index];
     const row = rows[index];
     if (!line || !row || !Number.isFinite(time)) return;
+    const elapsed = time - (previousTime ?? time);
+    previousTime = time;
+    if (video.seeking || elapsed < 0 || elapsed > cueContinuityLimit)
+      cancelStagger();
 
     const gap = gaps.get(time < line.start ? index : index + 1);
     const inGap = gap && time >= gap.start && time < gap.end ? gap : undefined;
@@ -326,6 +391,15 @@ export function renderLyrics(
     }
 
     const nextActive = !inGap && time >= line.start ? row : undefined;
+    const continuousTransition =
+      active &&
+      nextActive &&
+      active !== nextActive &&
+      focus === active &&
+      !video.paused &&
+      !video.seeking &&
+      elapsed > 0 &&
+      elapsed <= cueContinuityLimit;
     if (nextActive !== active) {
       active?.removeAttribute("aria-current");
       nextActive?.setAttribute("aria-current", "true");
@@ -338,7 +412,13 @@ export function renderLyrics(
     const nextFocus = counter ?? row;
     if (nextFocus !== focus || force) {
       focus = nextFocus;
-      if (viewport.clientHeight) following.follow(animate);
+      if (viewport.clientHeight)
+        following.follow(
+          animate,
+          continuousTransition
+            ? (distance) => staggerRows(index, distance)
+            : undefined,
+        );
     }
   }
 
@@ -361,14 +441,27 @@ export function renderLyrics(
     () => {
       observer.disconnect();
       sourceObserver.disconnect();
+      cancelStagger();
     },
     { once: true },
+  );
+  reducedMotion.addEventListener(
+    "change",
+    () => {
+      if (reducedMotion.matches) {
+        cancelStagger();
+        update(false, true);
+      }
+    },
+    { signal },
   );
   function lyricFor(target: EventTarget | null): TimedLyric | undefined {
     if (target instanceof HTMLButtonElement)
       return lyrics[rows.indexOf(target)];
   }
   function seek(lyric: TimedLyric): void {
+    cancelStagger();
+    previousTime = undefined;
     video.currentTime = lyric.start / 1000;
     update(true);
     following.resume();

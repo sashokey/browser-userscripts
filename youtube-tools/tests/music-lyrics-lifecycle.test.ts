@@ -198,7 +198,7 @@ async function fixture(context: TestContext, abortFetch = false) {
   const window = Object.assign(new EventTarget(), {
     setTimeout,
     clearTimeout,
-    matchMedia: () => ({ matches: true }),
+    matchMedia: () => Object.assign(new EventTarget(), { matches: true }),
   });
   const environment = {
     location: { hostname: "music.youtube.com" },
