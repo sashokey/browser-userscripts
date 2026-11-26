@@ -6,16 +6,29 @@ import { renderLyrics } from "../src/music-lyrics-view.ts";
 class Element extends EventTarget {
   readonly children: Element[] = [];
   readonly attributes = new Map<string, string>();
-  readonly style = { paddingBlockStart: "0px", paddingBlockEnd: "0px" };
+  readonly style = {
+    paddingBlockStart: "0px",
+    paddingBlockEnd: "0px",
+    setProperty: (name: string, value: string) => {
+      this.properties.set(name, value);
+    },
+    getPropertyValue: (name: string) => this.properties.get(name) ?? "",
+  };
+  private readonly properties = new Map<string, string>();
   textContent = "";
   className = "";
   parent: Element | undefined;
   nativeShelf: Element | undefined;
   scrollTop = 0;
+  scrollHeight = 200;
   clientHeight = 200;
   offsetHeight = 24;
   currentTime = 0;
+  duration = 0;
+  readyState = 4;
+  ended = false;
   paused = true;
+  hidden = false;
 
   constructor(tag: string) {
     super();
@@ -66,10 +79,89 @@ class Element extends EventTarget {
 }
 
 const lyrics = [
-  { text: "First", start: 0 },
-  { text: "Second", start: 1250 },
-  { text: "Last", start: 5000 },
+  { text: "First", start: 0, end: 1000 },
+  { text: "Second", start: 1250, end: 2500 },
+  { text: "Last", start: 5000, end: 7000 },
 ];
+
+void test("fills the current line continuously within its cue and recomputes on seek", (context) => {
+  const { panel, video, signal, tickFrame } = fixture(context, false);
+  Reflect.apply(renderLyrics, null, [panel, video, lyrics, signal]);
+  const row = panel.children[0]?.children[0]?.children[0];
+  assert.ok(row);
+  assert.equal(row.style.getPropertyValue("--youtube-tools-lyrics-progress"), "0%");
+  video.paused = false;
+  video.dispatchEvent(new Event("playing"));
+  video.currentTime = 0.6;
+  tickFrame();
+  assert.equal(row.style.getPropertyValue("--youtube-tools-lyrics-progress"), "60%");
+  video.readyState = 1;
+  video.dispatchEvent(new Event("waiting"));
+  video.currentTime = 0.8;
+  tickFrame();
+  assert.equal(row.style.getPropertyValue("--youtube-tools-lyrics-progress"), "60%");
+  video.paused = true;
+  video.dispatchEvent(new Event("pause"));
+  video.currentTime = 0.25;
+  video.dispatchEvent(new Event("seeked"));
+  assert.equal(row.style.getPropertyValue("--youtube-tools-lyrics-progress"), "25%");
+});
+
+void test("counts down a three-second instrumental gap without treating overlapping lines as silence", (context) => {
+  const { panel, video, signal } = fixture(context);
+  Reflect.apply(renderLyrics, null, [panel, video, [
+    { text: "First", start: 0, end: 5000 },
+    { text: "Overlapping", start: 1000, end: 2000 },
+    { text: "Before the gap", start: 5200, end: 6000 },
+    { text: "After the gap", start: 9000, end: 10000 },
+  ], signal]);
+  const list = panel.children[0]?.children[0];
+  const counters = list?.children.filter((child) =>
+    child.className === "youtube-tools-lyrics-instrumental"
+  );
+  assert.equal(counters?.length, 1);
+  const counter = counters?.[0];
+  assert.ok(counter);
+  assert.equal(counter.hidden, true);
+  video.currentTime = 6;
+  video.dispatchEvent(new Event("seeked"));
+  assert.equal(counter.hidden, false);
+  assert.equal(counter.textContent, "♪ 0:03");
+  video.currentTime = 8.25;
+  video.dispatchEvent(new Event("timeupdate"));
+  assert.equal(counter.textContent, "♪ 0:01");
+  video.currentTime = 9;
+  video.dispatchEvent(new Event("seeked"));
+  assert.equal(counter.hidden, true);
+  assert.equal(list?.children.at(-1)?.attributes.get("aria-current"), "true");
+});
+
+void test("scrolls plain lyrics to playback progress and resumes four seconds after manual scroll", async (context) => {
+  const { panel, video, signal, end } = fixture(context);
+  panel.scrollHeight = 1000;
+  video.duration = 200;
+  video.currentTime = 50;
+  const { followPlainLyrics } = await import("../src/music-lyrics-view.ts");
+  Reflect.apply(followPlainLyrics, null, [panel, video, signal]);
+  assert.equal(panel.scrollTop, 200);
+
+  panel.scrollTop = 320;
+  panel.dispatchEvent(new Event("scroll"));
+  video.currentTime = 150;
+  video.dispatchEvent(new Event("seeked"));
+  context.mock.timers.tick(3999);
+  assert.equal(panel.scrollTop, 320);
+  context.mock.timers.tick(1);
+  assert.equal(panel.scrollTop, 600);
+
+  video.currentTime = 200;
+  video.dispatchEvent(new Event("ended"));
+  assert.equal(panel.scrollTop, 800);
+  end();
+  video.currentTime = 0;
+  video.dispatchEvent(new Event("seeked"));
+  assert.equal(panel.scrollTop, 800);
+});
 
 void test("the source follows the lyrics and selecting a row seeks without resuming playback", (context) => {
   const { panel, video, signal } = fixture(context);
@@ -170,7 +262,7 @@ function click(list: Element, row: Element): void {
   list.dispatchEvent(event);
 }
 
-function fixture(context: TestContext) {
+function fixture(context: TestContext, reducedMotion = true) {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   const controller = new AbortController();
   const panel = new Element("ytmusic-tab-renderer");
@@ -182,10 +274,19 @@ function fixture(context: TestContext) {
   panel.nativeShelf = shelf;
   const video = new Element("video");
   let sourceChange: (() => void) | undefined;
+  let frameId = 0;
+  const frames = new Map<number, FrameRequestCallback>();
   const browserWindow = Object.assign(new EventTarget(), {
     setTimeout,
     clearTimeout,
-    matchMedia: () => ({ matches: true }),
+    matchMedia: () => ({ matches: reducedMotion }),
+    requestAnimationFrame: (callback: FrameRequestCallback) => {
+      frames.set(++frameId, callback);
+      return frameId;
+    },
+    cancelAnimationFrame: (id: number) => {
+      frames.delete(id);
+    },
   });
   const environment = {
     document: { createElement: (tag: string) => new Element(tag) },
@@ -217,6 +318,12 @@ function fixture(context: TestContext) {
     video,
     browserWindow,
     source,
+    tickFrame: () => {
+      for (const [id, callback] of [...frames]) {
+        frames.delete(id);
+        callback(0);
+      }
+    },
     notifySource: () => {
       sourceChange?.();
     },

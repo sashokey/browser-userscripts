@@ -45,8 +45,8 @@ const last = {
   cueRange: { startTimeMilliseconds: "5200", endTimeMilliseconds: "7600" },
 };
 const lines = [
-  { text: "First", start: 2100 },
-  { text: "Last", start: 5200 },
+  { text: "First", start: 2100, end: 3600 },
+  { text: "Last", start: 5200, end: 7600 },
 ];
 
 void test("fetches line timings from YouTube Music without sending credentials", async (context) => {
@@ -134,7 +134,14 @@ void test("keeps every lyric line when several share a start time", async (conte
       Response.json(
         url.includes("/next?")
           ? watch
-          : timed([first, { ...first, lyricLine: "Together" }, last]),
+          : timed([
+              first,
+              {
+                lyricLine: "Together",
+                cueRange: { ...first.cueRange, endTimeMilliseconds: "4100" },
+              },
+              last,
+            ]),
       ),
     ),
   );
@@ -146,8 +153,8 @@ void test("keeps every lyric line when several share a start time", async (conte
       new AbortController().signal,
     ),
     [
-      { text: "First\nTogether", start: 2100 },
-      { text: "Last", start: 5200 },
+      { text: "First\nTogether", start: 2100, end: 4100 },
+      { text: "Last", start: 5200, end: 7600 },
     ],
   );
 });

@@ -22,7 +22,13 @@ class Element extends EventTarget {
   readonly elements = new Map<string, Element>();
   readonly style = { paddingBlockStart: "", paddingBlockEnd: "" };
   className = "";
-  textContent = "";
+  private text = "";
+  get textContent(): string {
+    return this.text + this.children.map((child) => child.textContent).join("");
+  }
+  set textContent(value: string) {
+    this.text = value;
+  }
   parentElement: Element | undefined;
   data: object | undefined;
   tabs: object[] | undefined;

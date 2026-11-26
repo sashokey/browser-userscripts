@@ -1,4 +1,4 @@
-export type TimedLyric = { text: string; start: number };
+export type TimedLyric = { text: string; start: number; end: number };
 export const lyricsTimeout = 8000;
 
 function readField(value: unknown, ...keys: string[]): unknown {
@@ -46,8 +46,10 @@ function parseTimedLyrics(data: unknown): TimedLyric[] | undefined {
       end < start
     )
       return;
-    if (previous?.start === start) previous.text += `\n${text.trim()}`;
-    else timed.push({ text: text.trim(), start });
+    if (previous?.start === start) {
+      previous.text += `\n${text.trim()}`;
+      previous.end = Math.max(previous.end, end);
+    } else timed.push({ text: text.trim(), start, end });
   }
   if (timed.length) return timed;
 }

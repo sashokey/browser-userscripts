@@ -3,6 +3,7 @@ import { fetchTimedLyrics, lyricsTimeout } from "./music-lyrics-data.ts";
 import type { TimedLyric } from "./music-lyrics-data.ts";
 import {
   activeLyricsPanel,
+  followPlainLyrics,
   pendingLyricsPanel,
   plainLyricsPanel,
   renderLyrics,
@@ -28,6 +29,7 @@ type Presentation = {
   lookup: Lookup;
   controller: AbortController;
   viewport?: HTMLElement;
+  updatePlain?: () => void;
 };
 
 function hasLyricsEndpoint(tab: unknown): boolean {
@@ -191,10 +193,16 @@ export function musicLyrics(
       pendingLyricsPanel,
       !request.result && request.available !== false,
     );
-    panel.toggleAttribute(
-      plainLyricsPanel,
-      !!request.result && !lyrics && request.available !== false,
-    );
+    const plain = !!request.result && !lyrics && request.available !== false;
+    panel.toggleAttribute(plainLyricsPanel, plain);
+    if (plain) {
+      presentation.updatePlain ??= followPlainLyrics(
+        panel,
+        video,
+        presentation.controller.signal,
+      );
+      presentation.updatePlain();
+    }
     if (lyrics && !presentation.viewport)
       presentation.viewport = renderLyrics(
         panel,

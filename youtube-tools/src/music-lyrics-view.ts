@@ -9,8 +9,12 @@ const shelfSelector =
 const viewportClass = "youtube-tools-lyrics-viewport";
 const listClass = "youtube-tools-lyrics-lines";
 const sourceClass = "youtube-tools-lyrics-source";
+const instrumentalClass = "youtube-tools-lyrics-instrumental";
+const progressProperty = "--youtube-tools-lyrics-progress";
 const anchor = 0.42;
 const followDelay = 2000;
+const plainFollowDelay = 4000;
+const minimumInstrumentalGap = 3000;
 const transitionDuration = 360;
 
 export function styleLyrics(): void {
@@ -28,6 +32,7 @@ export function styleLyrics(): void {
     @keyframes youtube-tools-lyrics-loading { to { transform:rotate(360deg) } }
     .${viewportClass} { position:absolute; inset:0; overflow:hidden auto; overscroll-behavior-y:contain; overflow-anchor:none; scroll-behavior:auto; scrollbar-width:none }
     .${viewportClass}::-webkit-scrollbar { display:none }
+    ytmusic-tab-renderer[${plainLyricsPanel}] { overflow-anchor:none; scroll-behavior:auto }
     .${listClass}, [${plainLyricsPanel}] ${shelfSelector} .description {
       color:#fff; font-size:clamp(23px,3.5vw,32px); font-weight:700; line-height:1.18
     }
@@ -41,13 +46,181 @@ export function styleLyrics(): void {
       opacity:.45; transition:opacity 240ms ease-out
     }
     .${listClass} > [aria-current=true] { opacity:1 }
+    .${listClass} > button > span { pointer-events:none }
     .${listClass} > button:focus-visible { outline:2px solid currentColor; outline-offset:4px }
+    .${instrumentalClass} { justify-self:start; direction:ltr; font-variant-numeric:tabular-nums }
+    .${instrumentalClass}[hidden] { display:none }
+    @supports (background-clip:text) {
+      .${listClass} > [aria-current=true] > span, .${instrumentalClass} {
+        background-image:linear-gradient(90deg,#fff var(${progressProperty},100%),#ffffff73 var(${progressProperty},100%));
+        background-clip:text; color:transparent
+      }
+    }
     .${sourceClass} { color:var(--ytmusic-color-light-secondary,#aaa); padding:0 clamp(16px,3vw,36px) 12px; font-size:14px }
+    @media (prefers-reduced-motion: reduce), (forced-colors: active) {
+      .${listClass} > [aria-current=true] > span, .${instrumentalClass} { background:none; color:inherit }
+    }
     @media (prefers-reduced-motion: reduce) {
       .${listClass} > button { transition:none }
       [${pendingLyricsPanel}]::before { animation:none }
     }
   `);
+}
+
+function followScroll(
+  viewport: HTMLElement,
+  destination: () => number | undefined,
+  delay: number,
+  reducedMotion: MediaQueryList,
+  signal: AbortSignal,
+) {
+  let resumeTimer: number | undefined;
+  let frame: number | undefined;
+  let position = viewport.scrollTop;
+
+  function cancelMotion(): void {
+    if (frame !== undefined) window.cancelAnimationFrame(frame);
+    frame = undefined;
+  }
+
+  function scrollTo(top: number): void {
+    viewport.scrollTop = top;
+    position = viewport.scrollTop;
+  }
+
+  function follow(animate: boolean): void {
+    if (resumeTimer !== undefined || (!animate && frame !== undefined)) return;
+    const top = destination();
+    if (top === undefined) return;
+    cancelMotion();
+    const from = viewport.scrollTop;
+    if (!animate || reducedMotion.matches || Math.abs(from - top) < 1) {
+      if (from !== top) scrollTo(top);
+      return;
+    }
+    let started: number | undefined;
+    function step(now: number): void {
+      started ??= now;
+      const progress = Math.min(1, (now - started) / transitionDuration);
+      const eased = progress * progress * (3 - 2 * progress);
+      const target = destination() ?? from;
+      scrollTo(from + (target - from) * eased);
+      frame = progress < 1 ? window.requestAnimationFrame(step) : undefined;
+    }
+    frame = window.requestAnimationFrame(step);
+  }
+
+  function resume(): void {
+    window.clearTimeout(resumeTimer);
+    resumeTimer = undefined;
+    follow(true);
+  }
+
+  function pause(): void {
+    cancelMotion();
+    window.clearTimeout(resumeTimer);
+    resumeTimer = window.setTimeout(resume, delay);
+  }
+
+  for (const event of ["wheel", "touchmove"])
+    viewport.addEventListener(event, pause, { passive: true, signal });
+  viewport.addEventListener(
+    "scroll",
+    () => {
+      if (position === viewport.scrollTop) return;
+      position = viewport.scrollTop;
+      pause();
+    },
+    { passive: true, signal },
+  );
+  signal.addEventListener(
+    "abort",
+    () => {
+      cancelMotion();
+      window.clearTimeout(resumeTimer);
+    },
+    { once: true },
+  );
+  return { follow, resume };
+}
+
+function watchPosition(
+  video: HTMLVideoElement,
+  update: () => void,
+  animate: () => boolean,
+  signal: AbortSignal,
+): void {
+  let frame: number | undefined;
+  function cancel(): void {
+    if (frame !== undefined) window.cancelAnimationFrame(frame);
+    frame = undefined;
+  }
+  function refresh(): void {
+    update();
+    if (video.paused || video.ended || video.readyState < 2 || !animate())
+      cancel();
+    else frame ??= window.requestAnimationFrame(tick);
+  }
+  function tick(): void {
+    frame = undefined;
+    refresh();
+  }
+  for (const event of [
+    "timeupdate",
+    "seeking",
+    "seeked",
+    "playing",
+    "waiting",
+    "pause",
+    "ended",
+    "durationchange",
+  ])
+    video.addEventListener(event, refresh, { signal });
+  signal.addEventListener("abort", cancel, { once: true });
+  refresh();
+}
+
+export function followPlainLyrics(
+  panel: HTMLElement,
+  video: HTMLVideoElement,
+  signal: AbortSignal,
+): () => void {
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const following = followScroll(
+    panel,
+    () => {
+      const { currentTime, duration } = video;
+      if (
+        !Number.isFinite(duration) ||
+        duration <= 0 ||
+        !Number.isFinite(currentTime)
+      )
+        return;
+      const range = Math.max(0, panel.scrollHeight - panel.clientHeight);
+      return range * Math.min(1, Math.max(0, currentTime / duration));
+    },
+    plainFollowDelay,
+    reducedMotion,
+    signal,
+  );
+  const update = () => following.follow(false);
+  const observer = new ResizeObserver(update);
+  observer.observe(panel);
+  signal.addEventListener("abort", () => observer.disconnect(), { once: true });
+  watchPosition(video, update, () => !reducedMotion.matches, signal);
+  return update;
+}
+
+function fillText(
+  element: HTMLElement,
+  time: number,
+  start: number,
+  end: number,
+): void {
+  const fraction = end > start ? (time - start) / (end - start) : 1;
+  const fill = `${Math.round(Math.max(0, Math.min(1, fraction)) * 1000) / 10}%`;
+  if (element.style.getPropertyValue(progressProperty) !== fill)
+    element.style.setProperty(progressProperty, fill);
 }
 
 export function renderLyrics(
@@ -61,13 +234,28 @@ export function renderLyrics(
   viewport.tabIndex = 0;
   const list = document.createElement("div");
   list.className = listClass;
-  const rows = lyrics.map(({ text }) => {
+  const gaps = new Map<
+    number,
+    { start: number; end: number; counter: HTMLElement }
+  >();
+  let precedingEnd = 0;
+  const rows = lyrics.map(({ text, start, end }, index) => {
+    if (start - precedingEnd >= minimumInstrumentalGap) {
+      const counter = document.createElement("div");
+      counter.className = instrumentalClass;
+      counter.hidden = true;
+      gaps.set(index, { start: precedingEnd, end: start, counter });
+      list.append(counter);
+    }
+    precedingEnd = Math.max(precedingEnd, end);
     const row = document.createElement("button");
     row.type = "button";
-    row.textContent = text;
+    const words = document.createElement("span");
+    words.textContent = text;
+    row.append(words);
+    list.append(row);
     return row;
   });
-  list.append(...rows);
   viewport.append(list);
   const footer = document.createElement("div");
   footer.className = sourceClass;
@@ -96,69 +284,67 @@ export function renderLyrics(
   panel.setAttribute(activeLyricsPanel, "");
 
   let active: HTMLButtonElement | undefined;
-  let resumeTimer: number | undefined;
-  let frame: number | undefined;
-  let position = viewport.scrollTop;
+  let currentCounter: HTMLElement | undefined;
+  let focus: HTMLElement | undefined;
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-
-  function cancelMotion(): void {
-    if (frame !== undefined) window.cancelAnimationFrame(frame);
-    frame = undefined;
-  }
-
-  function scrollTo(top: number): void {
-    viewport.scrollTop = top;
-    position = viewport.scrollTop;
-  }
-
-  function align(row: HTMLElement, animate: boolean): void {
-    cancelMotion();
-    const from = viewport.scrollTop;
-    const top = Math.max(
-      0,
-      row.offsetTop + row.offsetHeight / 2 - viewport.clientHeight * anchor,
-    );
-    if (!animate || reducedMotion.matches || Math.abs(from - top) < 1) {
-      scrollTo(top);
-      return;
-    }
-    let started: number | undefined;
-    function step(now: number): void {
-      started ??= now;
-      const progress = Math.min(1, (now - started) / transitionDuration);
-      const eased = progress * progress * (3 - 2 * progress);
-      scrollTo(from + (top - from) * eased);
-      frame = progress < 1 ? window.requestAnimationFrame(step) : undefined;
-    }
-    frame = window.requestAnimationFrame(step);
-  }
+  const following = followScroll(
+    viewport,
+    () =>
+      focus &&
+      Math.max(
+        0,
+        focus.offsetTop + focus.offsetHeight / 2 - viewport.clientHeight * anchor,
+      ),
+    followDelay,
+    reducedMotion,
+    signal,
+  );
 
   function update(animate: boolean, force = false): void {
-    const row = rows[activeLyricIndex(lyrics, video.currentTime * 1000)];
-    if (!row || !viewport.clientHeight) return;
-    const changed = row !== active;
-    if (changed) {
-      active?.removeAttribute("aria-current");
-      row.setAttribute("aria-current", "true");
-      active = row;
+    const time = video.currentTime * 1000;
+    const index = activeLyricIndex(lyrics, time);
+    const line = lyrics[index];
+    const row = rows[index];
+    if (!line || !row || !Number.isFinite(time)) return;
+
+    const gap = gaps.get(time < line.start ? index : index + 1);
+    const inGap = gap && time >= gap.start && time < gap.end ? gap : undefined;
+    const counter = inGap?.counter;
+    if (currentCounter !== counter) {
+      if (currentCounter) currentCounter.hidden = true;
+      if (counter) counter.hidden = false;
+      currentCounter = counter;
     }
-    if (resumeTimer === undefined && (changed || force)) align(row, animate);
-  }
+    if (inGap) {
+      const remaining = Math.ceil((inGap.end - time) / 1000);
+      const minutes = Math.floor(remaining / 60);
+      const seconds = String(remaining % 60).padStart(2, "0");
+      const text = `♪ ${minutes}:${seconds}`;
+      if (inGap.counter.textContent !== text) inGap.counter.textContent = text;
+      if (!reducedMotion.matches)
+        fillText(inGap.counter, time, inGap.start, inGap.end);
+    }
 
-  function pauseFollowing(): void {
-    cancelMotion();
-    window.clearTimeout(resumeTimer);
-    resumeTimer = window.setTimeout(resumeFollowing, followDelay);
-  }
-
-  function resumeFollowing(): void {
-    window.clearTimeout(resumeTimer);
-    resumeTimer = undefined;
-    update(true, true);
+    const nextActive = !inGap && time >= line.start ? row : undefined;
+    if (nextActive !== active) {
+      active?.removeAttribute("aria-current");
+      nextActive?.setAttribute("aria-current", "true");
+      active = nextActive;
+    }
+    if (active && !reducedMotion.matches) {
+      const end = Math.min(line.end, lyrics[index + 1]?.start ?? line.end);
+      fillText(active, time, line.start, end);
+    }
+    const nextFocus = counter ?? row;
+    if (nextFocus !== focus || force) {
+      focus = nextFocus;
+      if (viewport.clientHeight) following.follow(animate);
+    }
   }
 
   function resize(): void {
-    const first = rows[0];
+    const leading = gaps.get(0)?.counter;
+    const first = leading && !leading.hidden ? leading : rows[0];
     const last = rows.at(-1);
     const height = viewport.clientHeight;
     if (!first || !last || !height) return;
@@ -175,21 +361,8 @@ export function renderLyrics(
     () => {
       observer.disconnect();
       sourceObserver.disconnect();
-      cancelMotion();
-      window.clearTimeout(resumeTimer);
     },
     { once: true },
-  );
-  for (const event of ["wheel", "touchmove"])
-    viewport.addEventListener(event, pauseFollowing, { passive: true, signal });
-  viewport.addEventListener(
-    "scroll",
-    () => {
-      if (position === viewport.scrollTop) return;
-      position = viewport.scrollTop;
-      pauseFollowing();
-    },
-    { passive: true, signal },
   );
   function lyricFor(target: EventTarget | null): TimedLyric | undefined {
     if (target instanceof HTMLButtonElement)
@@ -197,7 +370,8 @@ export function renderLyrics(
   }
   function seek(lyric: TimedLyric): void {
     video.currentTime = lyric.start / 1000;
-    resumeFollowing();
+    update(true);
+    following.resume();
   }
   list.addEventListener(
     "click",
@@ -224,14 +398,7 @@ export function renderLyrics(
   }
   for (const event of ["keydown", "keyup"] as const)
     window.addEventListener(event, activateWithKey, { capture: true, signal });
-  for (const event of ["timeupdate", "seeked"])
-    video.addEventListener(
-      event,
-      () => {
-        update(true);
-      },
-      { signal },
-    );
   resize();
+  watchPosition(video, () => update(true), () => !reducedMotion.matches, signal);
   return viewport;
 }
