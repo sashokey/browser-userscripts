@@ -14,6 +14,7 @@ const sourceClass = "youtube-tools-lyrics-source";
 const instrumentalClass = "youtube-tools-lyrics-instrumental";
 const progressProperty = "--youtube-tools-lyrics-progress";
 const scrollRemainder = "--youtube-tools-lyrics-scroll-remainder";
+const plainLeading = "--youtube-tools-lyrics-plain-leading";
 const anchor = 0.42;
 const followDelay = 2000;
 const plainFollowDelay = 4000;
@@ -39,6 +40,7 @@ export function styleLyrics(): void {
     .${viewportClass} { position:absolute; inset:0; overflow:hidden auto; overscroll-behavior-y:contain; overflow-anchor:none; scroll-behavior:auto; scrollbar-width:none }
     .${viewportClass}::-webkit-scrollbar { display:none }
     ytmusic-tab-renderer[${plainLyricsPanel}] { overflow-anchor:none; scroll-behavior:auto; scrollbar-width:none }
+    ytmusic-tab-renderer[${plainLyricsPanel}]::before { content:""; display:block; block-size:var(${plainLeading},0px) }
     ytmusic-tab-renderer[${plainLyricsPanel}]::-webkit-scrollbar { display:none }
     [${plainLyricsPanel}] ${shelfSelector} { translate:0 var(${scrollRemainder},0px) }
     .${listClass}, [${plainLyricsPanel}] ${shelfSelector} .description {
@@ -260,14 +262,32 @@ export function followPlainLyrics(
     },
   );
   const update = () => following.follow(false);
-  const observer = new ResizeObserver(update);
+  function updateLayout(): void {
+    const text = [...panel.querySelectorAll(`${shelfSelector} .description`)]
+      .find((element) => element.getClientRects().length > 0);
+    if (text && panel.clientHeight) {
+      const preceding = parseFloat(panel.style.getPropertyValue(plainLeading)) || 0;
+      const remainder = parseFloat(panel.style.getPropertyValue(scrollRemainder)) || 0;
+      const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
+      const naturalCenter = text.getBoundingClientRect().top
+        - panel.getBoundingClientRect().top - panel.clientTop
+        + panel.scrollTop - preceding - remainder + lineHeight / 2;
+      const leading = Math.max(0, Math.round(panel.clientHeight * anchor - naturalCenter));
+      if (Number.isFinite(leading) && preceding !== leading)
+        panel.style.setProperty(plainLeading, `${leading}px`);
+    }
+    update();
+  }
+  const observer = new ResizeObserver(updateLayout);
   observer.observe(panel);
   signal.addEventListener("abort", () => {
     clearRemainder();
+    panel.style.removeProperty(plainLeading);
     observer.disconnect();
   }, { once: true });
+  updateLayout();
   watchPosition(video, update, () => !reducedMotion.matches, signal);
-  return update;
+  return updateLayout;
 }
 
 function fillText(

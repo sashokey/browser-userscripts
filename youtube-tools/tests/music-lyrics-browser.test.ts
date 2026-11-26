@@ -129,14 +129,17 @@ async function withLyrics(
 }
 
 for (const host of hosts) {
-  void test(`plain lyrics scroll at subpixel positions without a scrollbar (${host})`, () =>
+  void test(`plain lyrics start at the cue anchor and scroll without a scrollbar (${host})`, () =>
     withLyrics(host, false, async (page) => {
       const panel = page.locator(plainSelector);
       await panel.waitFor();
       const result = await panel.evaluate((element) => {
         const shelf = element.querySelector("ytmusic-description-shelf-renderer");
+        const text = shelf?.querySelector(".description");
         const video = document.querySelector("video");
-        if (!shelf || !video) throw new Error("Missing plain lyrics");
+        if (!shelf || !text || !video) throw new Error("Missing plain lyrics");
+        const firstLineCenter = text.getBoundingClientRect().top
+          - element.getBoundingClientRect().top + parseFloat(getComputedStyle(text).lineHeight) / 2;
         const range = element.scrollHeight - element.clientHeight;
         const position = (offset: number) => {
           video.currentTime = offset * video.duration / range;
@@ -146,12 +149,14 @@ for (const host of hosts) {
         return {
           scrollbar: getComputedStyle(element).scrollbarWidth,
           scrollable: range > 11,
+          anchorError: Math.abs(firstLineCenter - 0.42 * element.clientHeight),
           first: position(10.25),
           second: position(10.75),
         };
       });
       assert.equal(result.scrollbar, "none");
       assert.equal(result.scrollable, true);
+      assert.ok(result.anchorError < 1, `First line is ${result.anchorError}px from the cue anchor`);
       assert.equal(result.first.pixel, result.second.pixel);
       assert.ok(Math.abs(result.first.top - result.second.top - 0.5) < 0.05);
     }));

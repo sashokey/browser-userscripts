@@ -39,6 +39,7 @@ class Element extends EventTarget {
   scrollTop = 0;
   scrollHeight = 200;
   clientHeight = 200;
+  clientTop = 0;
   offsetHeight = 24;
   currentTime = 0;
   duration = 0;
@@ -93,6 +94,20 @@ class Element extends EventTarget {
     return this.children.find((child) => `.${child.className}` === selector);
   }
 
+  querySelectorAll(selector: string): Element[] {
+    return selector.endsWith(" .description")
+      ? this.nativeShelf?.children.filter((child) => child.className === "description") ?? []
+      : [];
+  }
+
+  getClientRects(): object[] {
+    return this.hidden ? [] : [{}];
+  }
+
+  getBoundingClientRect(): { top: number } {
+    return { top: 0 };
+  }
+
   setAttribute(name: string, value: string): void {
     this.attributes.set(name, value);
   }
@@ -112,6 +127,31 @@ const transitionLyrics = [
   ...lyrics,
   { text: "Encore", start: 7500, end: 8000 },
 ];
+
+void test("anchors the first visible plain lyric to the synced line position and updates on resize", (context) => {
+  const { panel, video, shelf, signal, notifyResize, end } = fixture(context);
+  const spacing = "--youtube-tools-lyrics-plain-leading";
+  const hidden = new Element("yt-formatted-string");
+  hidden.className = "description";
+  hidden.hidden = true;
+  const text = new Element("yt-formatted-string");
+  text.className = "description";
+  text.getBoundingClientRect = () => ({
+    top: 16 + (parseFloat(panel.style.getPropertyValue(spacing)) || 0) - panel.scrollTop,
+  });
+  shelf.append(hidden, text);
+  video.duration = 200;
+
+  Reflect.apply(followPlainLyrics, null, [panel, video, signal]);
+  assert.equal(panel.style.getPropertyValue(spacing), "56px");
+  assert.equal(text.getBoundingClientRect().top + 12, 0.42 * panel.clientHeight);
+  panel.clientHeight = 300;
+  notifyResize();
+  assert.equal(panel.style.getPropertyValue(spacing), "98px");
+  assert.equal(text.getBoundingClientRect().top + 12, 0.42 * panel.clientHeight);
+  end();
+  assert.equal(panel.style.getPropertyValue(spacing), "");
+});
 
 void test("preserves fractional plain lyrics movement even when the scroller rounds to whole pixels", (context) => {
   const { panel, video, signal, tickFrame, end } = fixture(context, false);
@@ -414,6 +454,7 @@ function fixture(context: TestContext, reducedMotion = true) {
   const video = new Element("video");
   const styles: string[] = [];
   let sourceChange: (() => void) | undefined;
+  let resize: (() => void) | undefined;
   let frameId = 0;
   const frames = new Map<number, FrameRequestCallback>();
   const motionPreference = Object.assign(new EventTarget(), { matches: reducedMotion });
@@ -434,7 +475,7 @@ function fixture(context: TestContext, reducedMotion = true) {
     window: browserWindow,
     HTMLButtonElement: Element,
     GM_addStyle: (style: string) => styles.push(style),
-    getComputedStyle: () => ({ translate: "none" }),
+    getComputedStyle: () => ({ translate: "none", lineHeight: "24px" }),
     MutationObserver: class {
       constructor(callback: () => void) {
         sourceChange = callback;
@@ -445,8 +486,13 @@ function fixture(context: TestContext, reducedMotion = true) {
       }
     },
     ResizeObserver: class {
+      constructor(callback: () => void) {
+        resize = callback;
+      }
       observe(): void {}
-      disconnect(): void {}
+      disconnect(): void {
+        resize = undefined;
+      }
     },
   };
   for (const [key, value] of Object.entries(environment))
@@ -459,6 +505,7 @@ function fixture(context: TestContext, reducedMotion = true) {
   return {
     panel,
     video,
+    shelf,
     browserWindow,
     motionPreference,
     source,
@@ -471,6 +518,9 @@ function fixture(context: TestContext, reducedMotion = true) {
     },
     notifySource: () => {
       sourceChange?.();
+    },
+    notifyResize: () => {
+      resize?.();
     },
     signal: controller.signal,
     end: () => {
