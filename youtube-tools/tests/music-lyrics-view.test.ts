@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
-import { renderLyrics } from "../src/music-lyrics-view.ts";
+import { followPlainLyrics, renderLyrics, styleLyrics } from "../src/music-lyrics-view.ts";
 
 class RowAnimation {
   playState: AnimationPlayState = "running";
@@ -29,6 +29,7 @@ class Element extends EventTarget {
       this.properties.set(name, value);
     },
     getPropertyValue: (name: string) => this.properties.get(name) ?? "",
+    removeProperty: (name: string) => this.properties.delete(name),
   };
   private readonly properties = new Map<string, string>();
   textContent = "";
@@ -111,6 +112,58 @@ const transitionLyrics = [
   ...lyrics,
   { text: "Encore", start: 7500, end: 8000 },
 ];
+
+void test("preserves fractional plain lyrics movement even when the scroller rounds to whole pixels", (context) => {
+  const { panel, video, signal, tickFrame, end } = fixture(context, false);
+  let pixel = 0;
+  Object.defineProperty(panel, "scrollTop", {
+    get: () => pixel,
+    set: (value: number) => { pixel = Math.floor(value); },
+  });
+  panel.scrollHeight = 400;
+  video.duration = 200;
+  video.currentTime = 10.25;
+  video.paused = false;
+  Reflect.apply(followPlainLyrics, null, [panel, video, signal]);
+  const remainder = "--youtube-tools-lyrics-scroll-remainder";
+  assert.equal(pixel, 10);
+  assert.equal(panel.style.getPropertyValue(remainder), "-0.25px");
+  video.currentTime = 10.5;
+  tickFrame();
+  assert.equal(pixel, 10);
+  assert.equal(panel.style.getPropertyValue(remainder), "-0.5px");
+  panel.dispatchEvent(new Event("wheel"));
+  assert.equal(panel.style.getPropertyValue(remainder), "");
+  context.mock.timers.tick(4000);
+  end();
+  assert.equal(panel.style.getPropertyValue(remainder), "");
+});
+
+void test("clears progress from an outgoing cue while keeping the new cue active", (context) => {
+  const { panel, video, signal } = fixture(context, false);
+  Reflect.apply(renderLyrics, null, [panel, video, lyrics, signal]);
+  const first = panel.children[0]?.children[0]?.children[0];
+  const second = panel.children[0]?.children[0]?.children[1];
+  assert.ok(first && second);
+  const progress = "--youtube-tools-lyrics-progress";
+  video.currentTime = 0.9;
+  video.dispatchEvent(new Event("timeupdate"));
+  assert.equal(first.style.getPropertyValue(progress), "90%");
+  video.currentTime = 1.25;
+  video.dispatchEvent(new Event("timeupdate"));
+  assert.equal(first.attributes.get("aria-current"), undefined);
+  assert.equal(first.style.getPropertyValue(progress), "");
+  assert.equal(second.attributes.get("aria-current"), "true");
+  assert.equal(second.style.getPropertyValue(progress), "0%");
+});
+
+void test("hides the plain lyrics scrollbar and animates desktop hover on inactive seekable lines", (context) => {
+  const { styles } = fixture(context);
+  styleLyrics();
+  assert.match(styles.join(""), /ytmusic-tab-renderer\[data-youtube-tools-plain-lyrics\][^{]*\{[^}]*scrollbar-width:none/);
+  assert.match(styles.join(""), /@media\s*\(hover:hover\)\s*\{\s*\.youtube-tools-lyrics-lines > button:not\(\[aria-current=true\]\):hover\s*\{[^}]*color:#b9b9b9/);
+  assert.match(styles.join(""), /transition:color 240ms ease-out/);
+});
 
 void test("stages the visible lines behind the new active line and cancels the movement on manual scroll", (context) => {
   const { panel, video, signal, tickFrame } = fixture(context, false);
@@ -359,6 +412,7 @@ function fixture(context: TestContext, reducedMotion = true) {
   shelf.append(source);
   panel.nativeShelf = shelf;
   const video = new Element("video");
+  const styles: string[] = [];
   let sourceChange: (() => void) | undefined;
   let frameId = 0;
   const frames = new Map<number, FrameRequestCallback>();
@@ -379,6 +433,7 @@ function fixture(context: TestContext, reducedMotion = true) {
     document: { createElement: (tag: string) => new Element(tag) },
     window: browserWindow,
     HTMLButtonElement: Element,
+    GM_addStyle: (style: string) => styles.push(style),
     getComputedStyle: () => ({ translate: "none" }),
     MutationObserver: class {
       constructor(callback: () => void) {
@@ -407,6 +462,7 @@ function fixture(context: TestContext, reducedMotion = true) {
     browserWindow,
     motionPreference,
     source,
+    styles,
     tickFrame: () => {
       for (const [id, callback] of [...frames]) {
         frames.delete(id);

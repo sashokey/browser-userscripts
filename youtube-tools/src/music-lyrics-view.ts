@@ -4,6 +4,8 @@ import type { TimedLyric } from "./music-lyrics-data.ts";
 export const activeLyricsPanel = "data-youtube-tools-synced-lyrics";
 export const pendingLyricsPanel = "data-youtube-tools-lyrics-pending";
 export const plainLyricsPanel = "data-youtube-tools-plain-lyrics";
+export const lyricsFillOff = "data-youtube-tools-lyrics-fill-off";
+export const lyricsFillToggle = "data-youtube-tools-lyrics-fill-toggle";
 const shelfSelector =
   "ytmusic-description-shelf-renderer[is-track-lyrics-page]";
 const viewportClass = "youtube-tools-lyrics-viewport";
@@ -11,6 +13,7 @@ const listClass = "youtube-tools-lyrics-lines";
 const sourceClass = "youtube-tools-lyrics-source";
 const instrumentalClass = "youtube-tools-lyrics-instrumental";
 const progressProperty = "--youtube-tools-lyrics-progress";
+const scrollRemainder = "--youtube-tools-lyrics-scroll-remainder";
 const anchor = 0.42;
 const followDelay = 2000;
 const plainFollowDelay = 4000;
@@ -21,6 +24,7 @@ const cueContinuityLimit = 120;
 
 export function styleLyrics(): void {
   GM_addStyle(`
+    @property ${progressProperty} { syntax:"<percentage>"; inherits:true; initial-value:0% }
     ytmusic-tab-renderer[${activeLyricsPanel}] { position:relative; overflow:hidden!important }
     [${activeLyricsPanel}] ${shelfSelector} { position:absolute; inset:auto 0 0; pointer-events:none }
     [${activeLyricsPanel}] ${shelfSelector} :is(.description,#description-button,.footer) { display:none!important }
@@ -34,7 +38,9 @@ export function styleLyrics(): void {
     @keyframes youtube-tools-lyrics-loading { to { transform:rotate(360deg) } }
     .${viewportClass} { position:absolute; inset:0; overflow:hidden auto; overscroll-behavior-y:contain; overflow-anchor:none; scroll-behavior:auto; scrollbar-width:none }
     .${viewportClass}::-webkit-scrollbar { display:none }
-    ytmusic-tab-renderer[${plainLyricsPanel}] { overflow-anchor:none; scroll-behavior:auto }
+    ytmusic-tab-renderer[${plainLyricsPanel}] { overflow-anchor:none; scroll-behavior:auto; scrollbar-width:none }
+    ytmusic-tab-renderer[${plainLyricsPanel}]::-webkit-scrollbar { display:none }
+    [${plainLyricsPanel}] ${shelfSelector} { translate:0 var(${scrollRemainder},0px) }
     .${listClass}, [${plainLyricsPanel}] ${shelfSelector} .description {
       color:#fff; font-size:clamp(23px,3.5vw,32px); font-weight:700; line-height:1.18
     }
@@ -43,26 +49,43 @@ export function styleLyrics(): void {
       padding-inline:clamp(16px,3vw,36px)
     }
     .${listClass} > button {
-      background:none; border:0; padding:0; font:inherit; color:inherit; text-align:start;
+      background:none; border:0; padding:0; font:inherit; color:#737373; text-align:start;
       min-width:0; white-space:pre-line; overflow-wrap:anywhere; cursor:pointer;
-      opacity:.45; scale:.97; transform-origin:left center;
-      transition:opacity 240ms ease-out,scale 240ms ease-in-out
+      scale:.97; transform-origin:left center;
+      transition:color 240ms ease-out,scale 240ms ease-in-out,${progressProperty} 240ms ease-out
     }
     .${listClass} > button:dir(rtl) { transform-origin:right center }
-    .${listClass} > [aria-current=true] { opacity:1; scale:1 }
+    .${listClass} > [aria-current=true] { color:#fff; scale:1; transition:color 240ms ease-out,scale 240ms ease-in-out }
     .${listClass} > button > span { pointer-events:none }
     .${listClass} > button:focus-visible { outline:2px solid currentColor; outline-offset:4px }
     .${instrumentalClass} { justify-self:start; direction:ltr; font-variant-numeric:tabular-nums }
     .${instrumentalClass}[hidden] { display:none }
-    @supports (background-clip:text) {
-      .${listClass} > [aria-current=true] > span, .${instrumentalClass} {
-        background-image:linear-gradient(90deg,#fff var(${progressProperty},100%),#ffffff73 var(${progressProperty},100%));
-        background-clip:text; color:transparent
+    @media (prefers-reduced-motion:no-preference) and (forced-colors:none) {
+      @supports (background-clip:text) {
+        .${viewportClass}:not([${lyricsFillOff}]) .${listClass} > [aria-current=true] { color:#737373 }
+        .${viewportClass}:not([${lyricsFillOff}]) .${listClass} > button > span, .${instrumentalClass} {
+          background-image:linear-gradient(90deg,#fff var(${progressProperty},0%),currentColor var(${progressProperty},0%));
+          background-clip:text; -webkit-text-fill-color:transparent
+        }
+        .${instrumentalClass} { color:#737373 }
       }
     }
     .${sourceClass} { color:var(--ytmusic-color-light-secondary,#aaa); padding:0 clamp(16px,3vw,36px) 12px; font-size:14px }
-    @media (prefers-reduced-motion: reduce), (forced-colors: active) {
-      .${listClass} > [aria-current=true] > span, .${instrumentalClass} { background:none; color:inherit }
+    button[${lyricsFillToggle}] {
+      display:grid; place-items:center; flex:none; width:36px; height:36px; padding:0; border:0;
+      border-radius:50%; background:transparent; color:#f1f1f1; cursor:pointer
+    }
+    button[${lyricsFillToggle}][aria-pressed=false] { color:var(--ytmusic-color-light-secondary,#aaa) }
+    button[${lyricsFillToggle}]::before {
+      content:""; width:18px; height:18px;
+      background:linear-gradient(currentColor,currentColor) left 3px/18px 2px no-repeat,
+        linear-gradient(currentColor,currentColor) left 8px/18px 2px no-repeat,
+        linear-gradient(currentColor,currentColor) left 13px/12px 2px no-repeat
+    }
+    button[${lyricsFillToggle}]:focus-visible { outline:2px solid currentColor; outline-offset:-2px }
+    @media (hover:hover) {
+      .${listClass} > button:not([aria-current=true]):hover { color:#b9b9b9 }
+      button[${lyricsFillToggle}]:hover { background:rgba(255,255,255,.1) }
     }
     @media (prefers-reduced-motion: reduce) {
       .${listClass} > button { transition:none }
@@ -77,7 +100,10 @@ function followScroll(
   delay: number,
   reducedMotion: MediaQueryList,
   signal: AbortSignal,
-  onManualScroll?: () => void,
+  { onManualScroll, onPosition }: {
+    onManualScroll?: () => void;
+    onPosition?: (remainder: number) => void;
+  } = {},
 ) {
   let resumeTimer: number | undefined;
   let frame: number | undefined;
@@ -89,8 +115,9 @@ function followScroll(
   }
 
   function scrollTo(top: number): void {
-    viewport.scrollTop = top;
+    viewport.scrollTop = onPosition && !reducedMotion.matches ? Math.floor(top) : top;
     position = viewport.scrollTop;
+    onPosition?.(reducedMotion.matches ? 0 : position - top);
   }
 
   function follow(
@@ -109,6 +136,7 @@ function followScroll(
     const distance = top - from;
     if (!animate || reducedMotion.matches || Math.abs(distance) < 1) {
       if (from !== top) scrollTo(top);
+      else onPosition?.(0);
       return;
     }
     const stagger =
@@ -204,6 +232,7 @@ export function followPlainLyrics(
   signal: AbortSignal,
 ): () => void {
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const clearRemainder = () => { panel.style.removeProperty(scrollRemainder); };
   const following = followScroll(
     panel,
     () => {
@@ -220,11 +249,23 @@ export function followPlainLyrics(
     plainFollowDelay,
     reducedMotion,
     signal,
+    {
+      onManualScroll: clearRemainder,
+      onPosition: (offset) => {
+        const value = `${offset}px`;
+        if (offset === 0) clearRemainder();
+        else if (panel.style.getPropertyValue(scrollRemainder) !== value)
+          panel.style.setProperty(scrollRemainder, value);
+      },
+    },
   );
   const update = () => following.follow(false);
   const observer = new ResizeObserver(update);
   observer.observe(panel);
-  signal.addEventListener("abort", () => observer.disconnect(), { once: true });
+  signal.addEventListener("abort", () => {
+    clearRemainder();
+    observer.disconnect();
+  }, { once: true });
   watchPosition(video, update, () => !reducedMotion.matches, signal);
   return update;
 }
@@ -358,7 +399,7 @@ export function renderLyrics(
     followDelay,
     reducedMotion,
     signal,
-    cancelStagger,
+    { onManualScroll: cancelStagger },
   );
 
   function update(animate: boolean, force = false): void {
@@ -402,6 +443,7 @@ export function renderLyrics(
       elapsed <= cueContinuityLimit;
     if (nextActive !== active) {
       active?.removeAttribute("aria-current");
+      active?.style.removeProperty(progressProperty);
       nextActive?.setAttribute("aria-current", "true");
       active = nextActive;
     }

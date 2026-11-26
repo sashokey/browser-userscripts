@@ -4,6 +4,8 @@ import type { TimedLyric } from "./music-lyrics-data.ts";
 import {
   activeLyricsPanel,
   followPlainLyrics,
+  lyricsFillOff,
+  lyricsFillToggle,
   pendingLyricsPanel,
   plainLyricsPanel,
   renderLyrics,
@@ -14,6 +16,7 @@ const pageSelector = "ytmusic-player-page";
 const panelSelector = "ytmusic-tab-renderer#tab-renderer";
 const buttonSelector = "tp-yt-paper-tab[role=tab]";
 const lyricsPageType = "MUSIC_PAGE_TYPE_TRACK_LYRICS";
+const volumeSelector = "ytmusic-player-bar .right-controls-buttons > yt-icon-button.volume";
 
 type Result = { lyrics: readonly TimedLyric[] | undefined };
 type Lookup = {
@@ -95,9 +98,38 @@ export function musicLyrics(
   let presentation: Presentation | undefined;
   let cached: { id: string; lyrics: readonly TimedLyric[] } | undefined;
   let prefersLyrics: boolean | undefined;
+  let fillEnabled = true;
+  let fillToggle: HTMLButtonElement | undefined;
   let transition:
     { panel: HTMLElement; until: number; timer: number } | undefined;
   const observer = new MutationObserver(refresh);
+
+  function syncFillToggle(app: Element | null): void {
+    const volume = app?.querySelector(volumeSelector);
+    if (!volume) {
+      fillToggle?.remove();
+      fillToggle = undefined;
+      return;
+    }
+    if (!fillToggle) {
+      const button = document.createElement("button");
+      const label = document.documentElement.lang.startsWith("ru")
+        ? "Заполнение слов"
+        : "Lyric word fill";
+      button.type = "button";
+      button.title = label;
+      button.setAttribute(lyricsFillToggle, "");
+      button.setAttribute("aria-label", label);
+      button.setAttribute("aria-pressed", String(fillEnabled));
+      button.addEventListener("click", () => {
+        fillEnabled = !fillEnabled;
+        button.setAttribute("aria-pressed", String(fillEnabled));
+        presentation?.viewport?.toggleAttribute(lyricsFillOff, !fillEnabled);
+      });
+      fillToggle = button;
+    }
+    if (fillToggle.nextElementSibling !== volume) volume.before(fillToggle);
+  }
 
   function stopLookup(): void {
     lookup?.controller.abort();
@@ -203,13 +235,15 @@ export function musicLyrics(
       );
       presentation.updatePlain();
     }
-    if (lyrics && !presentation.viewport)
+    if (lyrics && !presentation.viewport) {
       presentation.viewport = renderLyrics(
         panel,
         video,
         lyrics,
         presentation.controller.signal,
       );
+      presentation.viewport.toggleAttribute(lyricsFillOff, !fillEnabled);
+    }
     const viewport = presentation.viewport;
     if (viewport && viewport.parentElement !== panel) panel.append(viewport);
   }
@@ -272,6 +306,7 @@ export function musicLyrics(
   }
 
   return (app) => {
+    syncFillToggle(app);
     if (page && app?.contains(page)) return;
     const next = app?.querySelector(pageSelector) ?? null;
     if (page === next) return;

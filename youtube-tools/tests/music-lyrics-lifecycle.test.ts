@@ -13,6 +13,7 @@ const tabButton = "tp-yt-paper-tab[role=tab]";
 const pending = "data-youtube-tools-lyrics-pending";
 const plain = "data-youtube-tools-plain-lyrics";
 const viewport = "youtube-tools-lyrics-viewport";
+const volumeSelector = "ytmusic-player-bar .right-controls-buttons > yt-icon-button.volume";
 const firstTrack = "yntRHKkkWic";
 const secondTrack = "J7p4bzqLvCw";
 
@@ -20,7 +21,14 @@ class Element extends EventTarget {
   readonly attributes = new Map<string, string>();
   readonly children: Element[] = [];
   readonly elements = new Map<string, Element>();
-  readonly style = { paddingBlockStart: "", paddingBlockEnd: "" };
+  readonly properties = new Map<string, string>();
+  readonly style = {
+    paddingBlockStart: "",
+    paddingBlockEnd: "",
+    setProperty: (name: string, value: string) => this.properties.set(name, value),
+    getPropertyValue: (name: string) => this.properties.get(name) ?? "",
+    removeProperty: (name: string) => this.properties.delete(name),
+  };
   className = "";
   private text = "";
   get textContent(): string {
@@ -79,6 +87,19 @@ class Element extends EventTarget {
       child.parentElement = this;
       this.children.push(child);
     }
+  }
+
+  get nextElementSibling(): Element | undefined {
+    const siblings = this.parentElement?.children;
+    return siblings?.[siblings.indexOf(this) + 1];
+  }
+
+  before(child: Element): void {
+    const parent = this.parentElement;
+    if (!parent) return;
+    child.remove();
+    parent.children.splice(parent.children.indexOf(this), 0, child);
+    child.parentElement = parent;
   }
 
   remove(): void {
@@ -156,6 +177,9 @@ const timed = (text: string) =>
 
 async function fixture(context: TestContext, abortFetch = false) {
   const app = new Element();
+  const controls = new Element();
+  const volume = new Element();
+  controls.append(volume);
   const page = new Element();
   const panel = new Element();
   const native = new Element();
@@ -204,6 +228,7 @@ async function fixture(context: TestContext, abortFetch = false) {
     location: { hostname: "music.youtube.com" },
     document: Object.assign(new EventTarget(), {
       createElement: () => new Element(),
+      documentElement: { lang: "en" },
     }),
     window,
     unsafeWindow: window,
@@ -304,6 +329,9 @@ async function fixture(context: TestContext, abortFetch = false) {
   });
   return {
     page,
+    controls,
+    volume,
+    exposeVolume: () => app.elements.set(volumeSelector, volume),
     panel,
     native,
     wrapper,
@@ -378,6 +406,32 @@ async function fixture(context: TestContext, abortFetch = false) {
     calls: () => fetch.mock.callCount(),
   };
 }
+
+void test("places one lyric word fill toggle before volume and keeps its setting across tracks", async (context) => {
+  const scene = await fixture(context);
+  scene.exposeVolume();
+  scene.start();
+  await nextTurn();
+  scene.resolve(timed("First track"));
+  await nextTurn();
+  const [toggle, volume] = scene.controls.children;
+  assert.ok(toggle && toggle !== scene.volume);
+  assert.equal(volume, scene.volume);
+  assert.equal(toggle.getAttribute("aria-pressed"), "true");
+  toggle.dispatchEvent(new Event("click"));
+  const disabled = "data-youtube-tools-lyrics-fill-off";
+  assert.equal(toggle.getAttribute("aria-pressed"), "false");
+  assert.equal(scene.view()?.hasAttribute(disabled), true);
+  scene.changeTrack();
+  scene.start();
+  await nextTurn();
+  assert.equal(scene.view()?.hasAttribute(disabled), true);
+  assert.deepEqual(scene.controls.children, [toggle, volume]);
+  toggle.dispatchEvent(new Event("click"));
+  assert.equal(scene.view()?.hasAttribute(disabled), false);
+  scene.close();
+  assert.deepEqual(scene.controls.children, [volume]);
+});
 
 void test("covers the native lyrics while timings are pending and reveals the synced view directly", async (context) => {
   const scene = await fixture(context);
